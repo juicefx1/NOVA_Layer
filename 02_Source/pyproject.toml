@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nova-layer"
-version = "0.1.5.dev0"
+version = "1.0.0rc1"
 description = "NOVA Layer Phase 1 vertical slice"
 requires-python = ">=3.12,<3.14"
 dependencies = [
