@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nova-layer.local/contracts/depth_pose_request_v1.schema.json",
+  "title": "NOVA Depth Pose Request 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "frame_number",
+    "width",
+    "height",
+    "requested_labels",
+    "image"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "frame_number": { "type": "integer", "minimum": 0 },
+    "width": { "type": "integer", "minimum": 1 },
+    "height": { "type": "integer", "minimum": 1 },
+    "requested_labels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "data"],
+      "properties": {
+        "encoding": { "const": "rgb8_base64" },
+        "data": { "type": "string", "contentEncoding": "base64" }
+      }
+    }
+  }
+}

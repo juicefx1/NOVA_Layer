@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.bad_sdk",
+  "display_name": "Bad SDK",
+  "description": "Incompatible SDK version",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "99.0",
+  "plugin_type": "inference",
+  "capabilities": ["cpu"],
+  "entry_module": "plugin"
+}

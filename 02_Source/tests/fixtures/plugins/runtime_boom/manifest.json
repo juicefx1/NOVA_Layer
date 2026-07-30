@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.runtime_boom",
+  "display_name": "Runtime Boom",
+  "description": "Raises during registration",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "1.0",
+  "plugin_type": "inference",
+  "capabilities": ["cpu"],
+  "entry_module": "plugin"
+}

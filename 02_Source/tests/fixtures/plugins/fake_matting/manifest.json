@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.fake_matting",
+  "display_name": "Fake Matting Plugin",
+  "description": "Deterministic matting plugin for Plugin SDK tests.",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "1.0",
+  "plugin_type": "matting",
+  "capabilities": ["alpha_matting", "cpu"],
+  "entry_module": "plugin"
+}

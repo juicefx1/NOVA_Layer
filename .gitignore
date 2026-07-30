@@ -1,0 +1,23 @@
+# Local AI model weights and evaluation artifacts
+03_AI/models/*.pt
+03_AI/models/*.pth
+03_AI/models/*.safetensors
+
+# Python development artifacts
+02_Source/.venv/
+02_Source/.mypy_cache/
+02_Source/.pytest_cache/
+02_Source/.ruff_cache/
+**/__pycache__/
+
+# macOS
+.DS_Store
+
+# Build artifacts
+07_Build/
+
+# Release artifacts
+08_Release/
+
+# Generated test reports
+06_Test/reports/

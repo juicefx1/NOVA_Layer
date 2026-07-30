@@ -1,0 +1,24 @@
+{
+  "suite": "NOVA Layer Representative Real Footage",
+  "gates": {
+    "minimum_mean_iou": 0.85,
+    "minimum_pass_rate": 0.9,
+    "maximum_mean_duration_seconds": 20.0
+  },
+  "cases": [
+    {
+      "id": "human-closeup-clean-edge",
+      "media": "footage/human_closeup.mov",
+      "source_media_fingerprint": "sha256:replace-with-imported-media-fingerprint",
+      "frame": 48,
+      "ground_truth_mask": "ground_truth/human_closeup_000048.png",
+      "points": [
+        {"x": 0.5, "y": 0.45, "polarity": "positive"},
+        {"x": 0.1, "y": 0.1, "polarity": "negative"}
+      ],
+      "bounding_region": {"x": 0.25, "y": 0.08, "width": 0.5, "height": 0.86},
+      "minimum_iou": 0.85,
+      "annotation_status": "candidate"
+    }
+  ]
+}

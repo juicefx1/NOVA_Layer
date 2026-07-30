@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.fake_host",
+  "display_name": "Fake Host Plugin",
+  "description": "Host adapter plugin for Plugin SDK tests.",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "1.0",
+  "plugin_type": "host_adapter",
+  "capabilities": ["filesystem_host"],
+  "entry_module": "plugin"
+}

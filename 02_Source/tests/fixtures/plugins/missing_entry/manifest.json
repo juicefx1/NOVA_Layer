@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.missing_entry",
+  "display_name": "Missing Entry",
+  "description": "Entry module file absent",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "1.0",
+  "plugin_type": "inference",
+  "capabilities": ["cpu"],
+  "entry_module": "plugin"
+}

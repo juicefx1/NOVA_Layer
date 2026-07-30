@@ -1,0 +1,9 @@
+{
+  "plugin_id": "test.invalid",
+  "display_name": "Invalid",
+  "version": "1.0.0",
+  "sdk_version": "1.0",
+  "plugin_type": "not_a_real_type",
+  "capabilities": ["cpu"],
+  "entry_module": "plugin"
+}

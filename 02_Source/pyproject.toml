@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nova-layer"
+version = "0.1.5.dev0"
+description = "NOVA Layer Phase 1 vertical slice"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "pydantic>=2.10,<3",
+]
+
+[project.scripts]
+nova-layer = "nova_layer.__main__:main"
+nova-acceptance = "nova_layer.acceptance:main"
+nova-model-preflight = "nova_layer.model_evaluation:main"
+nova-video-benchmark = "nova_layer.sam2_video_benchmark:main"
+nova-real-benchmark = "nova_layer.real_footage_benchmark:main"
+nova-dataset-export = "nova_layer.benchmark_dataset:main"
+nova-dataset-review = "nova_layer.benchmark_review:main"
+nova-review-assets = "nova_layer.benchmark_review_assets:main"
+nova-benchmark-compare = "nova_layer.benchmark_comparison:main"
+nova-baseline-promote = "nova_layer.benchmark_baseline:main"
+nova-baseline-activate = "nova_layer.benchmark_baseline_activate:main"
+nova-release-verify = "nova_layer.release_artifact:main"
+nova-release-candidate = "nova_layer.release_candidate:main"
+nova-release-audit = "nova_layer.release_candidate_audit:main"
+nova-install-smoke = "nova_layer.release_install_smoke:main"
+nova-skeleton-check = "nova_layer.skeleton_adapter_check:main"
+nova-depth-pose-bridge = "nova_layer.depth_pose_bridge_server:main"
+nova-depth-pose-benchmark = "nova_layer.depth_pose_benchmark:main"
+nova-depth-pose-review = "nova_layer.depth_pose_benchmark:review_main"
+nova-depth-pose-review-assets = "nova_layer.depth_pose_review_assets:main"
+nova-depth-pose-export = "nova_layer.depth_pose_dataset:main"
+nova-depth-pose-compare = "nova_layer.depth_pose_comparison:main"
+nova-depth-pose-smoke = "nova_layer.depth_pose_smoke:main"
+nova-export-render = "nova_layer.export_render:main"
+nova-host-session = "nova_layer.host_session:main"
+
+[project.optional-dependencies]
+desktop = [
+  "PySide6>=6.8,<7",
+  "av>=14,<19",
+  "numpy>=2.1,<3",
+  "OpenEXR>=3.3,<4",
+]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<10",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.9,<1",
+]
+ai = [
+  "torch==2.7.1",
+  "torchvision==0.22.1",
+  "pillow>=11,<13",
+  "SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nova_layer"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not real_model and not real_host'"
+markers = [
+  "real_model: optional local SAM/model smoke tests (require artefacts; not in default run)",
+  "real_host: optional commercial Host bridge smoke tests (require local Host; not in default run)",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["nova_layer"]

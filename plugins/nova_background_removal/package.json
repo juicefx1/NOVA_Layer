@@ -1,0 +1,9 @@
+{
+  "package_format": "1.0",
+  "plugin_id": "nova.background_removal",
+  "version": "1.0.0",
+  "sdk_version": "1.0",
+  "display_name": "Background Removal",
+  "description": "Official matting plugin using ConfirmedMaskRefine (deterministic MVP; no ONNX).",
+  "author": "NOVA Layer"
+}

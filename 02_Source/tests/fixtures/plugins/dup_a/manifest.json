@@ -1,0 +1,11 @@
+{
+  "plugin_id": "test.duplicate",
+  "display_name": "Duplicate A",
+  "description": "First duplicate",
+  "version": "1.0.0",
+  "author": "NOVA Tests",
+  "sdk_version": "1.0",
+  "plugin_type": "inference",
+  "capabilities": ["cpu"],
+  "entry_module": "plugin"
+}

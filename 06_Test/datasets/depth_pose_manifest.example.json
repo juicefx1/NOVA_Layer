@@ -1,0 +1,38 @@
+{
+  "suite": "NOVA Depth Pose Representative Footage",
+  "gates": {
+    "maximum_mean_temporal_relative_depth_delta": 0.15,
+    "minimum_temporal_transition_coverage": 0.8
+  },
+  "cases": [
+    {
+      "id": "standing-person-front",
+      "media": "footage/standing_person_front.mov",
+      "source_media_fingerprint": "replace-with-imported-media-fingerprint",
+      "frame": 24,
+      "depth_sequence": "standing-person-shot-01",
+      "annotation_status": "candidate",
+      "pck_threshold": 0.05,
+      "minimum_pck": 0.8,
+      "minimum_joint_coverage": 0.8,
+      "minimum_depth_coverage": 0.8,
+      "minimum_sampled_depth_coverage": 0.8,
+      "maximum_duration_seconds": 20.0,
+      "artist_skeleton": {
+        "joints": [
+          {"x": 0.4, "y": 0.3, "label": "left_shoulder"},
+          {"x": 0.6, "y": 0.3, "label": "right_shoulder"}
+        ],
+        "bones": []
+      },
+      "ground_truth_skeleton": {
+        "joints": [
+          {"x": 0.41, "y": 0.29, "label": "left_shoulder"},
+          {"x": 0.59, "y": 0.29, "label": "right_shoulder"}
+        ],
+        "bones": []
+      },
+      "review": null
+    }
+  ]
+}

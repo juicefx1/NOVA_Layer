@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>NOVA Depth/Pose Worker</title>
+    <style>
+      :root { color-scheme: dark; font: 15px system-ui, sans-serif; }
+      body { max-width: 760px; margin: 48px auto; padding: 0 24px; background: #101216; color: #e8ebf0; }
+      .panel { background: #191d24; border: 1px solid #303642; border-radius: 12px; padding: 20px; }
+      label { display: block; margin: 14px 0 6px; color: #aeb7c6; }
+      input { box-sizing: border-box; width: 100%; padding: 10px; color: inherit; background: #0f1217; border: 1px solid #414958; border-radius: 7px; }
+      button { margin-top: 16px; padding: 10px 18px; border: 0; border-radius: 7px; background: #6d5dfc; color: white; font-weight: 650; }
+      button[disabled] { opacity: .45; }
+      #status { margin-top: 18px; white-space: pre-wrap; color: #a9d6b5; }
+      .warning { color: #f1c879; }
+      code { color: #c7c0ff; }
+    </style>
+  </head>
+  <body>
+    <h1>NOVA Depth/Pose Worker</h1>
+    <div class="panel">
+      <p>This local page processes frames supplied by NOVA. Source images are not sent by the broker to a remote inference service.</p>
+      <p class="warning">Only load a provider module after its code, model weights, telemetry, and commercial-use licenses have been approved.</p>
+      <label for="provider">Licensed provider module URL</label>
+      <input id="provider" type="url" placeholder="/providers/movenet-depth-anything-v2.js" autocomplete="off">
+      <p>The bundled provider uses MoveNet SinglePose Lightning and Depth Anything V2 Small. Starting it downloads pinned runtime packages and model weights from their upstream hosts.</p>
+      <button id="start">Load provider and start</button>
+      <div id="status">Idle</div>
+    </div>
+    <script type="module" src="/worker.js"></script>
+  </body>
+</html>
