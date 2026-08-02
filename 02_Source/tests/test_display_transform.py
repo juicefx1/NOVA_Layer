@@ -92,3 +92,32 @@ def test_nan_and_inf_are_safe() -> None:
 
 def test_display_transform_alias_is_legacy() -> None:
     assert DisplayTransform is LegacyDisplayTransform
+
+
+def test_legacy_via_exposure_zero_matches_bare() -> None:
+    from nova_layer.adapters.color.exposure_transform import ExposureTransform
+    from nova_layer.adapters.color.display_transform import ViewerDisplayTransform
+
+    linear = np.full((2, 2, 3), 0.18, dtype=np.float32)
+    bare = LegacyDisplayTransform().apply(linear)
+    composed = ViewerDisplayTransform(
+        exposure=ExposureTransform(0.0),
+        display_transform=LegacyDisplayTransform(),
+    ).apply(linear)
+    assert np.array_equal(bare, composed)
+
+
+def test_legacy_via_exposure_plus_one_brightens() -> None:
+    from nova_layer.adapters.color.exposure_transform import ExposureTransform
+    from nova_layer.adapters.color.display_transform import ViewerDisplayTransform
+
+    pixel = np.array([[[0.18, 0.18, 0.18]]], dtype=np.float32)
+    base = ViewerDisplayTransform(
+        exposure=ExposureTransform(0.0),
+        display_transform=LegacyDisplayTransform(),
+    ).apply(pixel)
+    bright = ViewerDisplayTransform(
+        exposure=ExposureTransform(1.0),
+        display_transform=LegacyDisplayTransform(),
+    ).apply(pixel)
+    assert int(bright[0, 0, 0]) > int(base[0, 0, 0])

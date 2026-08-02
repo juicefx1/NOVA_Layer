@@ -127,7 +127,7 @@ def test_custom_transform_applied_on_exr_path(
     assert transform.calls
 
 
-def test_set_display_transform_rebuilds_reader_and_clears_cache(
+def test_set_display_transform_keeps_reader_clears_preview_cache(
     tmp_path: Path,
     qapp: object,
 ) -> None:
@@ -163,13 +163,85 @@ def test_set_display_transform_rebuilds_reader_and_clears_cache(
     transform = RecordingTransform()
     controller.set_display_transform(transform)
 
-    assert controller._media_reader is not old_reader
-    assert controller._frame_decoder is not old_decoder
+    assert controller._media_reader is old_reader
+    assert controller._frame_decoder is old_decoder
     assert isinstance(controller._media_reader, ImageSequenceReader)
     assert controller._media_reader.display_transform is transform
     assert controller._frame_decoder.cache_count == 0
     assert requested == [0, shot.master_frame]
     assert shot.master_frame != 0
+
+
+def test_set_display_transform_reuses_exr_raw_decode(
+    tmp_path: Path,
+    qapp: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    sequence = tmp_path / "exr_seq"
+    sequence.mkdir()
+    (sequence / "frame.exr").write_bytes(b"placeholder")
+    decode_count = 0
+
+    class FakeSpec:
+        height = 1
+        width = 1
+        nchannels = 3
+
+    class FakeInput:
+        def spec(self) -> FakeSpec:
+            return FakeSpec()
+
+        def read_image(self, _fmt: object) -> np.ndarray:
+            nonlocal decode_count
+            decode_count += 1
+            return np.array([[[0.25, 0.25, 0.25]]], dtype=np.float32)
+
+        def close(self) -> None:
+            return None
+
+    class FakeOIIO:
+        FLOAT = object()
+
+        class ImageInput:
+            @staticmethod
+            def open(_path: str) -> FakeInput:
+                return FakeInput()
+
+    monkeypatch.setattr(
+        "nova_layer.adapters.media.image_sequence_reader._load_openimageio",
+        lambda: FakeOIIO,
+    )
+
+    from nova_layer.adapters.color.display_transform import ViewerDisplayTransform
+    from nova_layer.adapters.color.exposure_transform import ExposureTransform
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir(parents=True, exist_ok=True)
+    controller = ProjectController(
+        display_transform=ViewerDisplayTransform(
+            exposure=ExposureTransform(0.0),
+            display_transform=LegacyDisplayTransform(),
+        )
+    )
+    assert controller.create_project("EXR Raw", project_root) is not None
+    shot = controller.import_media(sequence)
+    assert shot is not None
+    media_path = Path(shot.media.source_path)
+
+    first = controller._frame_decoder.read_frame(media_path, 0)
+    assert decode_count == 1
+
+    controller.set_display_transform(
+        ViewerDisplayTransform(
+            exposure=ExposureTransform(1.0),
+            display_transform=LegacyDisplayTransform(),
+        )
+    )
+    second = controller._frame_decoder.read_frame(media_path, 0)
+    assert decode_count == 1
+    assert int(second[0, 0, 0]) > int(first[0, 0, 0])
+
 
 
 def test_diagnostics_expose_injected_transform(qapp: object) -> None:

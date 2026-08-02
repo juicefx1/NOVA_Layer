@@ -152,7 +152,12 @@ def _sanitize_rgb(rgb: NDArray[np.float32]) -> NDArray[np.float32]:
 
 
 class OcioDisplayTransform:
-    """Scene-linear float RGB(A) → preview uint8 via OpenColorIO Display/View."""
+    """Exposed float RGB(A) → preview uint8 via OpenColorIO Display/View.
+
+    Expects exposure (if any) to already be applied via :class:`ExposureTransform`.
+    The ``exposure`` constructor argument is retained only for diagnostics / compat
+    and is not applied as a gain inside :meth:`apply`.
+    """
 
     def __init__(
         self,
@@ -220,7 +225,6 @@ class OcioDisplayTransform:
             ) from exc
 
         self._cpu_processor = cpu_processor
-        self._exposure = float(exposure)
         self.diagnostics = DisplayTransformDiagnostics(
             backend="ocio",
             ocio_available=True,
@@ -229,7 +233,7 @@ class OcioDisplayTransform:
             display=resolved_display,
             view=resolved_view,
             input_color_space=input_color_space,
-            exposure=self._exposure,
+            exposure=float(exposure),
             fallback_reason=None,
         )
 
@@ -245,9 +249,6 @@ class OcioDisplayTransform:
             raise TypeError(f"Display transform expects floating image, got {array.dtype}")
 
         rgb = _sanitize_rgb(np.asarray(array[:, :, :3], dtype=np.float32))
-        if self._exposure != 0.0:
-            rgb = rgb * np.float32(2.0**self._exposure)
-
         working = np.ascontiguousarray(rgb, dtype=np.float32)
         try:
             self._cpu_processor.applyRGB(working)

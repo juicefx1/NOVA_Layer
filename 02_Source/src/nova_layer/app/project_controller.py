@@ -260,7 +260,10 @@ class ProjectController(QObject):
         self._display_transform = display_transform
         self._preview_frame_number: int | None = None
         self._media_reader = media_reader or PyAvMediaReader()
-        self._frame_decoder = FrameDecodeService(self._media_reader)
+        self._frame_decoder = FrameDecodeService(
+            self._media_reader,
+            display_transform=self._display_transform,
+        )
         self._frame_decoder.frame_ready.connect(self.frame_ready)
         self._frame_decoder.error_occurred.connect(self.error_occurred)
         self._segmentation = segmentation or MockSegmentationCapability()
@@ -307,14 +310,19 @@ class ProjectController(QObject):
         self,
         display_transform: DisplayTransformProtocol | None,
     ) -> None:
-        """Update color transform and rebuild the media reader when a shot is active."""
+        """Update color transform; keep EXR raw cache, invalidate previews, re-request."""
         self._display_transform = display_transform
         shot = self.active_shot
         if shot is None or shot.media.source_path is None:
             return
 
-        source = Path(shot.media.source_path)
-        self._set_media_reader(source)
+        reader = self._media_reader
+        if hasattr(reader, "display_transform"):
+            try:
+                reader.display_transform = display_transform  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        self._frame_decoder.set_display_transform(display_transform)
 
         if shot.media.link_state != MediaLinkState.LINKED:
             return
@@ -361,7 +369,10 @@ class ProjectController(QObject):
             path,
             display_transform=self._display_transform,
         )
-        self._frame_decoder = FrameDecodeService(self._media_reader)
+        self._frame_decoder = FrameDecodeService(
+            self._media_reader,
+            display_transform=self._display_transform,
+        )
         self._frame_decoder.frame_ready.connect(self.frame_ready)
         self._frame_decoder.error_occurred.connect(self.error_occurred)
 

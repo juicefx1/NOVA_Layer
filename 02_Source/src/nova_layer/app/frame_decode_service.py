@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import OrderedDict
 from pathlib import Path
 from threading import Lock
 
@@ -8,6 +7,12 @@ import numpy as np
 from numpy.typing import NDArray
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
+from nova_layer.adapters.color.display_transform import (
+    DisplayTransformProtocol,
+    LegacyDisplayTransform,
+)
+from nova_layer.app.preview_pipeline import DEFAULT_PREVIEW_CACHE_SIZE, PreviewPipeline
+from nova_layer.app.raw_frame_cache import DEFAULT_RAW_FRAME_CACHE_SIZE
 from nova_layer.ports.media import MediaReader
 
 _DEFAULT_PREFETCH_COUNT = 4
@@ -24,18 +29,18 @@ class DecodeWorker(QRunnable):
         request_id: int,
         path: Path,
         frame_number: int,
-        reader: MediaReader,
+        pipeline: PreviewPipeline,
     ) -> None:
         super().__init__()
         self.request_id = request_id
         self.path = path
         self.frame_number = frame_number
-        self.reader = reader
+        self.pipeline = pipeline
         self.signals = DecodeWorkerSignals()
 
     def run(self) -> None:
         try:
-            frame = self.reader.read_frame(self.path, self.frame_number)
+            frame = self.pipeline.read_frame(self.path, self.frame_number)
         except Exception as exc:
             self.signals.failed.emit(self.request_id, str(exc))
             return
@@ -48,7 +53,7 @@ class DecodeWorker(QRunnable):
 
 
 class PrefetchWorker(QRunnable):
-    """Warm upcoming frames into the LRU cache without emitting frame_ready."""
+    """Warm upcoming preview frames (and EXR raw via the pipeline) without emitting."""
 
     def __init__(
         self,
@@ -67,73 +72,32 @@ class PrefetchWorker(QRunnable):
 
     def run(self) -> None:
         service = self._service
+        # Prefer raw EXR warm first so exposure scrub reuses OIIO results.
+        service._pipeline.prefetch_raw(
+            self._path,
+            self._anchor_frame,
+            self._count,
+            is_current=lambda: service._prefetch_generation_active(self._generation),
+        )
         for offset in range(1, self._count + 1):
             if not service._prefetch_generation_active(self._generation):
                 return
             frame_number = self._anchor_frame + offset
-            key = _cache_key(self._path, frame_number)
             with service._lock:
                 if not service._prefetch_generation_active_unlocked(self._generation):
                     return
-                if service._cache.contains(key):
+                if service._pipeline.get_preview(self._path, frame_number) is not None:
                     continue
-                reader = service._reader
+                pipeline = service._pipeline
             try:
-                frame = reader.read_frame(key[0], frame_number)
+                frame = pipeline.read_frame(self._path, frame_number)
             except Exception:
                 continue
             with service._lock:
                 if not service._prefetch_generation_active_unlocked(self._generation):
                     return
-                service._cache.put(key, frame)
-
-
-class FrameCache:
-    """Thread-unsafe LRU store; callers must serialize access with an external Lock."""
-
-    def __init__(self, capacity: int) -> None:
-        if capacity < 1:
-            raise ValueError("cache_size must be positive")
-        self._capacity = capacity
-        self._items: OrderedDict[tuple[Path, int], NDArray[np.uint8]] = OrderedDict()
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @property
-    def capacity(self) -> int:
-        return self._capacity
-
-    def clear(self) -> None:
-        self._items.clear()
-
-    def contains(self, key: tuple[Path, int]) -> bool:
-        return key in self._items
-
-    def get(self, key: tuple[Path, int]) -> NDArray[np.uint8] | None:
-        cached = self._items.get(key)
-        if cached is None:
-            return None
-        self._items.move_to_end(key)
-        return cached
-
-    def put(
-        self,
-        key: tuple[Path, int],
-        image: NDArray[np.uint8],
-        *,
-        expand_to_fit: bool = False,
-    ) -> None:
-        self._items[key] = np.ascontiguousarray(image).copy()
-        self._items.move_to_end(key)
-        if expand_to_fit and len(self._items) > self._capacity:
-            self._capacity = len(self._items)
-        while len(self._items) > self._capacity:
-            self._items.popitem(last=False)
-
-
-def _cache_key(path: Path, frame_number: int) -> tuple[Path, int]:
-    return (path.expanduser().resolve(), frame_number)
+                # read_frame already cached preview under current transform identity
+                del frame
 
 
 class FrameDecodeService(QObject):
@@ -144,15 +108,27 @@ class FrameDecodeService(QObject):
         self,
         reader: MediaReader,
         *,
-        cache_size: int = 32,
+        display_transform: DisplayTransformProtocol | None = None,
+        cache_size: int = DEFAULT_PREVIEW_CACHE_SIZE,
+        raw_cache_size: int = DEFAULT_RAW_FRAME_CACHE_SIZE,
         prefetch_count: int = _DEFAULT_PREFETCH_COUNT,
         thread_pool: QThreadPool | None = None,
+        pipeline: PreviewPipeline | None = None,
     ) -> None:
         super().__init__()
         if prefetch_count < 0:
             raise ValueError("prefetch_count must be non-negative")
-        self._reader = reader
-        self._cache = FrameCache(cache_size)
+        transform = display_transform
+        if transform is None:
+            transform = getattr(reader, "display_transform", None)
+        if transform is None:
+            transform = LegacyDisplayTransform()
+        self._pipeline = pipeline or PreviewPipeline(
+            reader,
+            transform,
+            raw_cache_size=raw_cache_size,
+            preview_cache_size=cache_size,
+        )
         self._prefetch_count = prefetch_count
         self._prefetch_generation = 0
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
@@ -162,52 +138,52 @@ class FrameDecodeService(QObject):
 
     @property
     def cache_count(self) -> int:
-        with self._lock:
-            return len(self._cache)
+        return self._pipeline.preview_cache_count
+
+    @property
+    def pipeline(self) -> PreviewPipeline:
+        return self._pipeline
 
     @property
     def reader(self) -> MediaReader:
-        return self._reader
+        return self._pipeline.reader
 
     @reader.setter
     def reader(self, reader: MediaReader) -> None:
-        """Replace the MediaReader and drop cached frames for the previous source."""
+        """Replace the MediaReader and drop caches for the previous source."""
         with self._lock:
-            self._reader = reader
-            self._cache.clear()
+            self._pipeline.set_reader(reader, keep_raw_cache=False)
+            self._request_id += 1
+            self._prefetch_generation += 1
+
+    def set_display_transform(self, transform: DisplayTransformProtocol | None) -> None:
+        """Update color transform; keep EXR raw cache, clear preview cache."""
+        with self._lock:
+            self._pipeline.set_display_transform(transform)
             self._request_id += 1
             self._prefetch_generation += 1
 
     def request(self, path: Path, frame_number: int) -> None:
-        key = _cache_key(path, frame_number)
+        resolved = path.expanduser().resolve()
         with self._lock:
             self._prefetch_generation += 1
             self._request_id += 1
             request_id = self._request_id
-            cached = self._cache.get(key)
-            if cached is not None:
-                frame = cached.copy()
-            else:
-                frame = None
-        if frame is not None:
-            self.frame_ready.emit(frame_number, frame)
-            self._schedule_prefetch(key[0], frame_number)
+            cached = self._pipeline.get_preview(resolved, frame_number)
+        if cached is not None:
+            self.frame_ready.emit(frame_number, cached)
+            self._schedule_prefetch(resolved, frame_number)
             return
 
-        worker = DecodeWorker(request_id, key[0], frame_number, self._reader)
+        worker = DecodeWorker(request_id, resolved, frame_number, self._pipeline)
         worker.signals.completed.connect(self._completed)
         worker.signals.failed.connect(self._failed)
         self._active_workers.add(worker)
         self._thread_pool.start(worker)
 
     def get_cached(self, path: Path, frame_number: int) -> NDArray[np.uint8] | None:
-        """Return a copy of a cached frame, or None on miss (does not decode)."""
-        key = _cache_key(path, frame_number)
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is None:
-                return None
-            return cached.copy()
+        """Return a copy of a cached preview frame, or None on miss (does not decode)."""
+        return self._pipeline.get_preview(path, frame_number)
 
     def put_cached(
         self,
@@ -217,33 +193,32 @@ class FrameDecodeService(QObject):
         *,
         expand_to_fit: bool = False,
     ) -> None:
-        """Warm the decode cache (used by Application range-decode jobs)."""
-        key = _cache_key(path, frame_number)
-        with self._lock:
-            self._cache.put(key, image, expand_to_fit=expand_to_fit)
+        """Warm the preview cache (used by Application range-decode jobs)."""
+        self._pipeline.put_preview(
+            path,
+            frame_number,
+            image,
+            expand_to_fit=expand_to_fit,
+        )
 
     def read_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
-        """Synchronous decode with LRU cache reuse."""
-        key = _cache_key(path, frame_number)
+        """Synchronous decode with preview (+ EXR raw) cache reuse."""
+        resolved = path.expanduser().resolve()
         with self._lock:
             self._prefetch_generation += 1
-            cached = self._cache.get(key)
-            if cached is not None:
-                frame = cached.copy()
-            else:
-                frame = None
-        if frame is not None:
-            self._schedule_prefetch(key[0], frame_number)
-            return frame
-        decoded = self._reader.read_frame(key[0], frame_number)
-        with self._lock:
-            self._cache.put(key, decoded)
-        self._schedule_prefetch(key[0], frame_number)
-        return decoded.copy()
+        decoded = self._pipeline.read_frame(resolved, frame_number)
+        self._schedule_prefetch(resolved, frame_number)
+        return decoded
 
     def clear(self) -> None:
         with self._lock:
-            self._cache.clear()
+            self._pipeline.clear_all()
+            self._request_id += 1
+            self._prefetch_generation += 1
+
+    def clear_preview_cache(self) -> None:
+        with self._lock:
+            self._pipeline.clear_preview_cache()
             self._request_id += 1
             self._prefetch_generation += 1
 
@@ -271,14 +246,12 @@ class FrameDecodeService(QObject):
         frame_number: int,
         frame: NDArray[np.uint8],
     ) -> None:
-        key = _cache_key(Path(path), frame_number)
         with self._lock:
-            self._cache.put(key, frame)
             is_latest = request_id == self._request_id
         self._discard_finished_worker(request_id)
         if is_latest:
             self.frame_ready.emit(frame_number, frame)
-            self._schedule_prefetch(key[0], frame_number)
+            self._schedule_prefetch(Path(path), frame_number)
 
     def _failed(self, request_id: int, message: str) -> None:
         with self._lock:

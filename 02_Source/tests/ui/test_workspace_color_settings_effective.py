@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
-from nova_layer.adapters.color.display_transform import LegacyDisplayTransform
+from nova_layer.adapters.color.display_transform import (
+    LegacyDisplayTransform,
+    ViewerDisplayTransform,
+)
 from nova_layer.adapters.color.settings import ColorSettings
 from nova_layer.app.effective_color_settings import (
     COLOR_SETTINGS_PREFERENCE_KEY,
@@ -215,7 +218,8 @@ def test_neither_defaults_to_legacy(workspace: WorkspaceManager) -> None:
     application = apply_effective_color_settings(controller, workspace)
     assert application.resolved.backend == "legacy"
     assert application.resolved.source_backend == "default"
-    assert isinstance(application.transform, LegacyDisplayTransform)
+    assert isinstance(application.transform, ViewerDisplayTransform)
+    assert isinstance(application.transform.display_transform, LegacyDisplayTransform)
 
 
 def test_workspace_apply_keeps_project_override(

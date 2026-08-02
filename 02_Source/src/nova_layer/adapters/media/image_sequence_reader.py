@@ -14,6 +14,7 @@ from nova_layer.adapters.color.display_transform import (
     LegacyDisplayTransform,
 )
 from nova_layer.ports.media import MediaInfo, MediaReadError
+from nova_layer.ports.scene_frames import SceneFrame
 
 
 SUPPORTED_EXTENSIONS = {
@@ -83,17 +84,23 @@ def _read_exr_pillow(path: Path) -> NDArray[np.uint8]:
         ) from exc
 
 
-def _read_exr_openimageio(
-    path: Path,
-    oiio: Any,
-    display_transform: DisplayTransformProtocol,
-) -> NDArray[np.uint8]:
+def _sanitize_scene_rgb(rgb: NDArray[np.floating[Any]]) -> NDArray[np.float32]:
+    """Normalize EXR RGB for scene cache: float32, NaN/-Inf→0, +Inf→finite max."""
+    value = np.array(rgb, dtype=np.float32, copy=True)
+    value = np.where(np.isnan(value), np.float32(0.0), value)
+    value = np.where(value == -np.inf, np.float32(0.0), value)
+    finite_max = np.finfo(np.float32).max
+    value = np.where(value == np.inf, np.float32(finite_max), value)
+    return value
+
+
+def _load_exr_float_rgb(path: Path, oiio: Any) -> NDArray[np.float32]:
+    """Decode an EXR file to float32 HxWx3 RGB via OpenImageIO (no display transform)."""
     inp = oiio.ImageInput.open(str(path))
     if inp is None:
         raise MediaReadError(f"Could not open EXR: {path}")
     try:
         spec = inp.spec()
-        # FLOAT read accepts half and float EXR sources.
         pixels = inp.read_image(oiio.FLOAT)
         if pixels is None:
             raise MediaReadError(f"Could not read EXR pixels: {path}")
@@ -103,10 +110,11 @@ def _read_exr_openimageio(
             array = array.reshape(int(spec.height), int(spec.width), channels)
         elif array.ndim == 2:
             array = array.reshape(int(spec.height), int(spec.width), 1)
-        try:
-            return display_transform.apply(array)
-        except (TypeError, ValueError) as exc:
-            raise MediaReadError(f"Could not display-transform EXR: {path} ({exc})") from exc
+        if array.ndim != 3 or array.shape[2] < 3:
+            raise MediaReadError(
+                f"EXR scene frame requires at least 3 channels: {path} shape={array.shape}"
+            )
+        return _sanitize_scene_rgb(array[:, :, :3])
     except MediaReadError:
         raise
     except Exception as exc:
@@ -154,6 +162,10 @@ class ImageSequenceReader:
     def display_transform(self) -> DisplayTransformProtocol:
         return self._display_transform
 
+    @display_transform.setter
+    def display_transform(self, value: DisplayTransformProtocol | None) -> None:
+        self._display_transform = value or LegacyDisplayTransform()
+
     def inspect(self, path: Path) -> MediaInfo:
         folder = path.expanduser().resolve()
 
@@ -183,9 +195,7 @@ class ImageSequenceReader:
         path: Path,
         frame_number: int,
     ) -> NDArray[np.uint8]:
-
         folder = path.expanduser().resolve()
-
         files = list_sequence_files(folder)
 
         if frame_number < 0 or frame_number >= len(files):
@@ -195,11 +205,58 @@ class ImageSequenceReader:
 
         return self._read_raster(files[frame_number])
 
+    def read_scene_frame(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> SceneFrame:
+        """Decode an EXR sequence frame to scene-linear float32 RGB.
+
+        Requires OpenImageIO. Pillow fallback and non-EXR formats raise MediaReadError.
+        """
+        folder = path.expanduser().resolve()
+        files = list_sequence_files(folder)
+
+        if frame_number < 0 or frame_number >= len(files):
+            raise MediaReadError(
+                f"Frame {frame_number} is outside the sequence."
+            )
+
+        file_path = files[frame_number]
+        if file_path.suffix.lower() != _EXR_SUFFIX:
+            raise MediaReadError(
+                f"Scene frames are only supported for EXR sequences, got {file_path.suffix!r}"
+            )
+
+        oiio = _load_openimageio()
+        if oiio is None:
+            raise MediaReadError(
+                "OpenImageIO is required for EXR scene frames; Pillow fallback is not supported"
+            )
+
+        pixels = _load_exr_float_rgb(file_path, oiio)
+        height, width = int(pixels.shape[0]), int(pixels.shape[1])
+        return SceneFrame(
+            path=folder,
+            frame_number=frame_number,
+            pixels=pixels,
+            width=width,
+            height=height,
+            channels=3,
+            pixel_format="float32_rgb",
+        )
+
     def _read_exr(self, path: Path) -> NDArray[np.uint8]:
         """Decode an OpenEXR frame to preview uint8 RGB via DisplayTransform when float."""
         oiio = _load_openimageio()
         if oiio is not None:
-            return _read_exr_openimageio(path, oiio, self._display_transform)
+            pixels = _load_exr_float_rgb(path, oiio)
+            try:
+                return self._display_transform.apply(pixels)
+            except (TypeError, ValueError) as exc:
+                raise MediaReadError(
+                    f"Could not display-transform EXR: {path} ({exc})"
+                ) from exc
         return _read_exr_pillow(path)
 
     def _read_raster(self, path: Path) -> NDArray[np.uint8]:

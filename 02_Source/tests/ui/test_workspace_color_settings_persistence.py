@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
-from nova_layer.adapters.color.display_transform import LegacyDisplayTransform
+from nova_layer.adapters.color.display_transform import (
+    LegacyDisplayTransform,
+    ViewerDisplayTransform,
+)
 from nova_layer.app.project_controller import ProjectController
 from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
 from nova_layer.ui.color_settings_dialog import (
@@ -142,7 +145,11 @@ def test_invalid_config_restores_as_quiet_legacy_fallback(
     qtbot.addWidget(window)  # type: ignore[attr-defined]
 
     assert warnings == []
-    assert isinstance(project_controller._display_transform, LegacyDisplayTransform)
+    assert isinstance(project_controller._display_transform, ViewerDisplayTransform)
+    assert isinstance(
+        project_controller._display_transform.display_transform,
+        LegacyDisplayTransform,
+    )
     assert project_controller.display_transform_diagnostics is not None
     assert project_controller.display_transform_diagnostics.fallback_reason
 

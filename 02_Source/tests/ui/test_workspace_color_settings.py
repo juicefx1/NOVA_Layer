@@ -6,7 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
-from nova_layer.adapters.color.display_transform import LegacyDisplayTransform
+from nova_layer.adapters.color.display_transform import (
+    LegacyDisplayTransform,
+    ViewerDisplayTransform,
+)
 from nova_layer.app.project_controller import ProjectController
 from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
 from nova_layer.ui.color_settings_dialog import (
@@ -44,7 +47,8 @@ def test_legacy_apply_sets_legacy_transform(
 
     assert dialog.apply_settings() is True
     transform = project_controller._display_transform
-    assert isinstance(transform, LegacyDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, LegacyDisplayTransform)
     assert transform.diagnostics.backend == "legacy"
     assert transform.diagnostics.fallback_reason is None
     saved = workspace.get_preference(COLOR_SETTINGS_PREFERENCE_KEY)
@@ -78,7 +82,8 @@ def test_ocio_apply_falls_back_with_warning(
 
     assert dialog.apply_settings() is True
     transform = project_controller._display_transform
-    assert isinstance(transform, LegacyDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, LegacyDisplayTransform)
     assert transform.diagnostics.fallback_reason is not None
     assert abs(transform.diagnostics.exposure - 1.5) < 1e-6
     assert warnings
@@ -113,7 +118,11 @@ def test_apply_without_active_shot_is_safe(
     qtbot.addWidget(dialog)  # type: ignore[attr-defined]
     dialog.backend_combo.setCurrentText("Legacy")
     assert dialog.apply_settings() is True
-    assert isinstance(project_controller._display_transform, LegacyDisplayTransform)
+    assert isinstance(project_controller._display_transform, ViewerDisplayTransform)
+    assert isinstance(
+        project_controller._display_transform.display_transform,
+        LegacyDisplayTransform,
+    )
 
 
 def test_dialog_reopen_shows_diagnostics(

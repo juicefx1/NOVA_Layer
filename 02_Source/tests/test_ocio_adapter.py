@@ -8,6 +8,7 @@ import pytest
 from nova_layer.adapters.color.display_transform import (
     ColorTransformError,
     LegacyDisplayTransform,
+    ViewerDisplayTransform,
     create_display_transform,
 )
 from nova_layer.adapters.color.ocio_adapter import (
@@ -63,7 +64,8 @@ def test_factory_prefer_ocio_false_returns_legacy(minimal_ocio_config: Path) -> 
         prefer_ocio=False,
         config_path=minimal_ocio_config,
     )
-    assert isinstance(transform, LegacyDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, LegacyDisplayTransform)
     assert transform.diagnostics.backend == "legacy"
     assert transform.diagnostics.fallback_reason == "prefer_ocio=False"
 
@@ -84,7 +86,8 @@ def test_factory_falls_back_when_ocio_missing(
         prefer_ocio=True,
         config_path=minimal_ocio_config,
     )
-    assert isinstance(transform, LegacyDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, LegacyDisplayTransform)
     assert transform.diagnostics.backend == "legacy"
     assert transform.diagnostics.ocio_available is False
     assert "PyOpenColorIO" in (transform.diagnostics.fallback_reason or "")
@@ -142,14 +145,16 @@ def test_factory_falls_back_on_bad_config(tmp_path: Path) -> None:
             prefer_ocio=True,
             config_path=tmp_path / "nope.ocio",
         )
-        assert isinstance(transform, LegacyDisplayTransform)
+        assert isinstance(transform, ViewerDisplayTransform)
+        assert isinstance(transform.display_transform, LegacyDisplayTransform)
         assert transform.diagnostics.fallback_reason is not None
         return
 
     bad = tmp_path / "broken.ocio"
     bad.write_text("not a valid ocio config\n", encoding="utf-8")
     transform = create_display_transform(prefer_ocio=True, config_path=bad)
-    assert isinstance(transform, LegacyDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, LegacyDisplayTransform)
     assert transform.diagnostics.backend == "legacy"
     assert transform.diagnostics.fallback_reason is not None
 
@@ -178,8 +183,16 @@ def test_ocio_float_rgb_to_uint8(minimal_ocio_config: Path) -> None:
 @pytest.mark.skipif(not is_ocio_available(), reason="PyOpenColorIO not installed")
 def test_ocio_exposure_plus_one_stop(minimal_ocio_config: Path) -> None:
     pytest.importorskip("PyOpenColorIO")
-    base = OcioDisplayTransform(config_path=minimal_ocio_config, exposure=0.0)
-    bright = OcioDisplayTransform(config_path=minimal_ocio_config, exposure=1.0)
+    base = create_display_transform(
+        prefer_ocio=True,
+        config_path=minimal_ocio_config,
+        exposure=0.0,
+    )
+    bright = create_display_transform(
+        prefer_ocio=True,
+        config_path=minimal_ocio_config,
+        exposure=1.0,
+    )
     pixel = np.array([[[0.25, 0.25, 0.25]]], dtype=np.float32)
     base_u8 = int(base.apply(pixel)[0, 0, 0])
     bright_u8 = int(bright.apply(pixel)[0, 0, 0])
@@ -187,6 +200,8 @@ def test_ocio_exposure_plus_one_stop(minimal_ocio_config: Path) -> None:
     assert abs(base_u8 - 64) <= 1
     assert abs(bright_u8 - 128) <= 1
     assert bright_u8 > base_u8
+    assert isinstance(bright, ViewerDisplayTransform)
+    assert bright.diagnostics.exposure == pytest.approx(1.0)
 
 
 @pytest.mark.skipif(not is_ocio_available(), reason="PyOpenColorIO not installed")
@@ -217,9 +232,11 @@ def test_factory_selects_ocio_when_available(minimal_ocio_config: Path) -> None:
         prefer_ocio=True,
         config_path=minimal_ocio_config,
     )
-    assert isinstance(transform, OcioDisplayTransform)
+    assert isinstance(transform, ViewerDisplayTransform)
+    assert isinstance(transform.display_transform, OcioDisplayTransform)
     assert transform.diagnostics.backend == "ocio"
     assert transform.diagnostics.fallback_reason is None
+    assert transform.diagnostics.exposure == pytest.approx(0.0)
 
 
 @pytest.mark.skipif(not is_ocio_available(), reason="PyOpenColorIO not installed")

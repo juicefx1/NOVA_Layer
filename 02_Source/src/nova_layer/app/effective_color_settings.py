@@ -7,8 +7,10 @@ from typing import Any
 from nova_layer.adapters.color.display_transform import (
     DisplayTransformProtocol,
     LegacyDisplayTransform,
+    ViewerDisplayTransform,
     create_display_transform,
 )
+from nova_layer.adapters.color.exposure_transform import ExposureTransform
 from nova_layer.adapters.color.settings import (
     ColorSettings,
     ResolvedColorSettings,
@@ -63,8 +65,13 @@ def load_workspace_color_settings(workspace: WorkspaceManager) -> ColorSettings 
 def build_transform_from_resolved(
     resolved: ResolvedColorSettings,
 ) -> DisplayTransformProtocol:
+    exposure = ExposureTransform(float(resolved.exposure))
     if resolved.backend != "ocio":
-        return LegacyDisplayTransform()
+        # Intentional legacy: no fallback_reason (unlike prefer_ocio=False factory path).
+        return ViewerDisplayTransform(
+            exposure=exposure,
+            display_transform=LegacyDisplayTransform(),
+        )
     return create_display_transform(
         prefer_ocio=True,
         config_path=resolved.config_path,
