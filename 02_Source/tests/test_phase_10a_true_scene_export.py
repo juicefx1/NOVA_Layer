@@ -285,7 +285,13 @@ def test_scene_export_creates_exr_and_manifest(
     assert manifest["format_id"] == "scene_openexr_sequence"
     assert manifest["export_mode"] == "compose_scene"
     assert manifest["scene_linear"] is True
-    assert manifest["pixel_encoding"] == "scene_linear_half"
+    assert manifest["pixel_encoding"] == "file_native_scene_half"
+    assert manifest["source_color_space"] == "unspecified"
+    assert manifest["interpretation_color_space"] == "scene_linear"
+    assert manifest["export_color_space"] == "unspecified"
+    assert manifest["color_transform_applied"] is False
+    assert manifest["working_color_space"] is None
+    assert manifest["source_color_space"] != manifest["interpretation_color_space"]
     assert manifest["alpha_mode"] == "straight"
     assert manifest["premultiplied"] is False
     assert manifest["color_policy"]["color_policy"] == "scene"

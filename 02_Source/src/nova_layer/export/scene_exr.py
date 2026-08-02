@@ -1,4 +1,4 @@
-"""True Scene Linear EXR compose / write helpers (Phase 10A).
+"""True Scene Linear EXR compose / write helpers (Phase 10A / 10B).
 
 Separate from uint8-derived ``write_openexr_rgba`` — no 0–1 remapping.
 """
@@ -133,31 +133,81 @@ def write_scene_openexr_rgba(
 
 def build_scene_export_manifest_fields(
     *,
-    input_color_space: str | None,
-    media_fingerprint: str | None,
-    project_id: str | None,
-    shot_id: str | None,
-    layer_id: str | None,
-    source_render_version: int | None,
+    source_color_space: str | None = None,
+    source_color_space_source: str | None = None,
+    interpretation_color_space: str | None = None,
+    input_color_space: str | None = None,
+    media_fingerprint: str | None = None,
+    project_id: str | None = None,
+    shot_id: str | None = None,
+    layer_id: str | None = None,
+    source_render_version: int | None = None,
     frame_start: int,
     frame_end: int,
     pixel_type: str = "half",
+    config_path: str | None = None,
+    config_source: str | None = None,
 ) -> dict[str, Any]:
-    """Top-level + nested color_policy block for scene_openexr_sequence manifests."""
+    """Top-level + nested color_policy block for scene_openexr_sequence manifests.
+
+    Phase 10B separates file/source tags from PREVIEW interpretation ICS:
+
+    - ``source_color_space`` — SceneFrame tag (file-native; ``"unspecified"`` if none)
+    - ``interpretation_color_space`` — resolved project/workspace ``input_color_space``
+    - ``export_color_space`` — equals ``source_color_space`` (no working-space convert)
+    - ``working_color_space`` — always null in this phase
+    - ``input_color_space`` — backward-compatible alias of interpretation
+    """
+    source_tag = (
+        str(source_color_space).strip()
+        if source_color_space is not None and str(source_color_space).strip()
+        else "unspecified"
+    )
+    source_tag_source = (
+        str(source_color_space_source).strip()
+        if source_color_space_source is not None and str(source_color_space_source).strip()
+        else "unspecified"
+    )
+    interpretation = interpretation_color_space
+    if interpretation is None:
+        interpretation = input_color_space
+    interpretation_text = (
+        str(interpretation).strip()
+        if interpretation is not None and str(interpretation).strip()
+        else None
+    )
+
+    pixel_encoding = (
+        "file_native_scene_half" if pixel_type == "half" else "file_native_scene_float"
+    )
+    ocio_identity: dict[str, str | None] | None = None
+    if config_path or config_source:
+        ocio_identity = {
+            "config_path": config_path,
+            "config_source": config_source,
+        }
+
     color_policy: dict[str, Any] = {
         "color_policy": "scene",
         "render_source": "scene",
         "export_mode": "compose_scene",
         "scene_linear": True,
-        "pixel_encoding": "scene_linear_half"
-        if pixel_type == "half"
-        else "scene_linear_float",
+        "scene_display_transformed": False,
+        "pixel_encoding": pixel_encoding,
         "pixel_type": pixel_type,
-        "input_color_space": input_color_space or "scene_linear",
+        "source_color_space": source_tag,
+        "source_color_space_source": source_tag_source,
+        "interpretation_color_space": interpretation_text,
+        "working_color_space": None,
+        "export_color_space": source_tag,
+        "color_transform_applied": False,
+        # Backward-compatible: historical field tracks PREVIEW interpretation ICS.
+        "input_color_space": interpretation_text,
         "source_transform_version": None,
         "color_backend": "scene",
-        "config_path": None,
-        "config_source": None,
+        "config_path": config_path,
+        "config_source": config_source,
+        "ocio_config_identity": ocio_identity,
         "display": None,
         "view": None,
         "exposure": None,
@@ -170,13 +220,21 @@ def build_scene_export_manifest_fields(
         "color_policy_id": "scene",
         "render_source": "scene",
         "scene_linear": True,
-        "pixel_encoding": color_policy["pixel_encoding"],
+        "scene_display_transformed": False,
+        "pixel_encoding": pixel_encoding,
         "pixel_type": pixel_type,
-        "input_color_space": color_policy["input_color_space"],
+        "source_color_space": source_tag,
+        "source_color_space_source": source_tag_source,
+        "interpretation_color_space": interpretation_text,
+        "working_color_space": None,
+        "export_color_space": source_tag,
+        "color_transform_applied": False,
+        "input_color_space": interpretation_text,
         "source_transform_version": None,
         "color_backend": "scene",
-        "config_path": None,
-        "config_source": None,
+        "config_path": config_path,
+        "config_source": config_source,
+        "ocio_config_identity": ocio_identity,
         "display": None,
         "view": None,
         "exposure": None,

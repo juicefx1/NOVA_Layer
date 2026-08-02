@@ -441,7 +441,11 @@ class PreviewPipeline:
         return preview_u8.copy()
 
     def get_scene_frame(self, path: Path, frame_number: int) -> SceneFrame:
-        """Return scene-linear EXR pixels via the raw cache (no display transform)."""
+        """Return file-native EXR float RGB via the raw cache (no display transform).
+
+        SceneFrame.color_space is an interpretation tag only; PREVIEW still uses
+        the session ``input_color_space`` and never auto-overrides from the tag.
+        """
         resolved = _resolve_path(path)
         with self._lock:
             reader = self._reader
@@ -460,6 +464,22 @@ class PreviewPipeline:
                 f"Could not load scene frame {frame_number} from {resolved}."
             )
         return scene
+
+    def source_color_space_warning(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> str | None:
+        """SOURCE Legacy bake risk for a cached/decoded SceneFrame tag (pixels unchanged)."""
+        from nova_layer.app.scene_color_space import source_transform_warning
+
+        resolved = _resolve_path(path)
+        if not self._raw_cache.contains(resolved, frame_number):
+            return None
+        scene = self._raw_cache.get(resolved, frame_number)
+        if scene is None:
+            return None
+        return source_transform_warning(scene.color_space)
 
     def get_processing_frame(
         self,

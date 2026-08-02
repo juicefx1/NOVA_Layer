@@ -94,13 +94,79 @@ def _sanitize_scene_rgb(rgb: NDArray[np.floating[Any]]) -> NDArray[np.float32]:
     return value
 
 
-def _load_exr_float_rgb(path: Path, oiio: Any) -> NDArray[np.float32]:
-    """Decode an EXR file to float32 HxWx3 RGB via OpenImageIO (no display transform)."""
+def _spec_string_attribute(spec: Any, key: str) -> str | None:
+    """Best-effort OIIO ImageSpec string attribute read (never raises to caller)."""
+    get_string = getattr(spec, "get_string_attribute", None)
+    if callable(get_string):
+        try:
+            value = get_string(key, "")
+        except TypeError:
+            try:
+                value = get_string(key)
+            except Exception:
+                value = None
+        except Exception:
+            value = None
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+
+    get_attr = getattr(spec, "getattribute", None)
+    if callable(get_attr):
+        try:
+            value = get_attr(key)
+        except Exception:
+            value = None
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+
+    extra = getattr(spec, "extra_attribs", None)
+    if extra is not None:
+        try:
+            for item in extra:
+                name = getattr(item, "name", None)
+                if name == key:
+                    raw = getattr(item, "value", None)
+                    if raw is None and len(item) >= 2:  # type: ignore[arg-type]
+                        raw = item[1]
+                    if raw is not None:
+                        text = str(raw).strip()
+                        if text:
+                            return text
+        except Exception:
+            pass
+    return None
+
+
+def _probe_oiio_color_space(spec: Any) -> tuple[str | None, str]:
+    """Read file color-space tag from OIIO spec; never fails the decode path."""
+    try:
+        for key in ("oiio:ColorSpace", "ColorSpace", "colorspace"):
+            value = _spec_string_attribute(spec, key)
+            if value:
+                return value, "oiio"
+    except Exception:
+        return None, "unspecified"
+    return None, "unspecified"
+
+
+def _load_exr_float_rgb(
+    path: Path, oiio: Any
+) -> tuple[NDArray[np.float32], str | None, str]:
+    """Decode EXR to float32 HxWx3 RGB via OIIO and probe color-space tags.
+
+    Returns ``(pixels, color_space, color_space_source)``. Probe failures never
+    abort pixel decode.
+    """
     inp = oiio.ImageInput.open(str(path))
     if inp is None:
         raise MediaReadError(f"Could not open EXR: {path}")
     try:
         spec = inp.spec()
+        color_space, color_space_source = _probe_oiio_color_space(spec)
         pixels = inp.read_image(oiio.FLOAT)
         if pixels is None:
             raise MediaReadError(f"Could not read EXR pixels: {path}")
@@ -114,7 +180,11 @@ def _load_exr_float_rgb(path: Path, oiio: Any) -> NDArray[np.float32]:
             raise MediaReadError(
                 f"EXR scene frame requires at least 3 channels: {path} shape={array.shape}"
             )
-        return _sanitize_scene_rgb(array[:, :, :3])
+        return (
+            _sanitize_scene_rgb(array[:, :, :3]),
+            color_space,
+            color_space_source,
+        )
     except MediaReadError:
         raise
     except Exception as exc:
@@ -210,7 +280,7 @@ class ImageSequenceReader:
         path: Path,
         frame_number: int,
     ) -> SceneFrame:
-        """Decode an EXR sequence frame to scene-linear float32 RGB.
+        """Decode an EXR sequence frame to file-native float32 RGB.
 
         Requires OpenImageIO. Pillow fallback and non-EXR formats raise MediaReadError.
         """
@@ -234,7 +304,7 @@ class ImageSequenceReader:
                 "OpenImageIO is required for EXR scene frames; Pillow fallback is not supported"
             )
 
-        pixels = _load_exr_float_rgb(file_path, oiio)
+        pixels, color_space, color_space_source = _load_exr_float_rgb(file_path, oiio)
         height, width = int(pixels.shape[0]), int(pixels.shape[1])
         return SceneFrame(
             path=folder,
@@ -244,13 +314,15 @@ class ImageSequenceReader:
             height=height,
             channels=3,
             pixel_format="float32_rgb",
+            color_space=color_space,
+            color_space_source=color_space_source,
         )
 
     def _read_exr(self, path: Path) -> NDArray[np.uint8]:
         """Decode an OpenEXR frame to preview uint8 RGB via DisplayTransform when float."""
         oiio = _load_openimageio()
         if oiio is not None:
-            pixels = _load_exr_float_rgb(path, oiio)
+            pixels, _, _ = _load_exr_float_rgb(path, oiio)
             try:
                 return self._display_transform.apply(pixels)
             except (TypeError, ValueError) as exc:

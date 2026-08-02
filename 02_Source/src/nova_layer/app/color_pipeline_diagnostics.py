@@ -1,7 +1,7 @@
-"""Read-only Color Pipeline diagnostics snapshot (Phase 9B).
+"""Read-only Color Pipeline diagnostics snapshot (Phase 9B / 10B).
 
 Assembles existing cache / transform / resolve state without duplicating cache
-policy or mutating runtime caches.
+policy or mutating runtime caches beyond optional raw-cache peek.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from nova_layer.adapters.color.display_transform import DisplayTransformDiagnost
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.preview_pipeline import PreviewPipeline, TransformIdentity
+from nova_layer.app.scene_color_space import source_transform_warning as warning_for_source
 
 _BYTES_PER_MIB = 1024 * 1024
 
@@ -94,6 +95,12 @@ class ColorPipelineDiagnostics:
     last_render_color_policy: str | None
     warnings: tuple[str, ...]
 
+    # Phase 10B — SceneFrame tag / SOURCE risk (None when no cached scene frame).
+    active_source_color_space: str | None = None
+    source_color_space_source: str | None = None
+    interpretation_color_space: str | None = None
+    source_transform_warning: str | None = None
+
 
 _EMPTY_CACHE = FrameCacheStats(
     count=0,
@@ -117,6 +124,26 @@ _EMPTY_PIPELINE = PreviewPipelineStats(
 
 def empty_frame_cache_stats() -> FrameCacheStats:
     return _EMPTY_CACHE
+
+
+def _peek_cached_scene_tags(
+    pipeline: PreviewPipeline | None,
+    media_path: str | Path | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return (color_space, color_space_source, warning) if frame 0 is already cached."""
+    if pipeline is None or media_path is None:
+        return None, None, None
+    try:
+        path = Path(media_path)
+        if not pipeline.raw_cache.contains(path, 0):
+            return None, None, None
+        frame = pipeline.raw_cache.get(path, 0)
+        if frame is None:
+            return None, None, None
+        warn = warning_for_source(frame.color_space)
+        return frame.color_space, frame.color_space_source, warn
+    except Exception:
+        return None, None, None
 
 
 def build_color_pipeline_diagnostics(
@@ -188,6 +215,9 @@ def build_color_pipeline_diagnostics(
         config_source = identity.config_source
 
     media_text = None if media_path is None else str(media_path)
+    active_source, source_src, src_warn = _peek_cached_scene_tags(pipeline, media_path)
+    if src_warn and src_warn not in warnings:
+        warnings.append(src_warn)
 
     return ColorPipelineDiagnostics(
         active_backend=backend,
@@ -219,6 +249,10 @@ def build_color_pipeline_diagnostics(
         preview_generation_count=int(pipe.preview_generations),
         last_render_color_policy=last_render_color_policy,
         warnings=tuple(warnings),
+        active_source_color_space=active_source,
+        source_color_space_source=source_src,
+        interpretation_color_space=input_cs,
+        source_transform_warning=src_warn,
     )
 
 
@@ -237,6 +271,14 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"Fallback: {diagnostics.fallback_reason or '—'}",
         f"Shot: {diagnostics.shot_name or '—'}",
         f"Media: {diagnostics.media_path or '—'}",
+        f"Active source color space: "
+        f"{diagnostics.active_source_color_space or '—'}",
+        f"Source color space source: "
+        f"{diagnostics.source_color_space_source or '—'}",
+        f"Interpretation color space: "
+        f"{diagnostics.interpretation_color_space or '—'}",
+        f"SOURCE transform warning: "
+        f"{diagnostics.source_transform_warning or '—'}",
         "",
         _format_cache_line(
             "Raw Cache",

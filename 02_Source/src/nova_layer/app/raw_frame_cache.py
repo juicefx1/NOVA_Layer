@@ -203,4 +203,6 @@ def _copy_scene_frame(frame: SceneFrame) -> SceneFrame:
         height=frame.height,
         channels=frame.channels,
         pixel_format=frame.pixel_format,
+        color_space=frame.color_space,
+        color_space_source=frame.color_space_source,
     )

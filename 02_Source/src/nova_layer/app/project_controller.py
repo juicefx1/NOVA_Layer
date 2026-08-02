@@ -2781,6 +2781,12 @@ class ProjectController(QObject):
                 "mask_loader": _mask_loader,
                 "media_fingerprint": shot.media.fingerprint,
                 "input_color_space": input_cs,
+                "config_path": (
+                    diagnostics.config_path if diagnostics is not None else None
+                ),
+                "config_source": (
+                    diagnostics.config_source if diagnostics is not None else None
+                ),
             }
         safe_layer_name = re.sub(r"[^A-Za-z0-9_-]+", "_", layer.name).strip("_")
         export_stem = (

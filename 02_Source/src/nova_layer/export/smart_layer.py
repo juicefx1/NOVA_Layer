@@ -147,6 +147,8 @@ def export_smart_layer_assets(
     mask_loader: Callable[[str], NDArray[np.uint8]] | None = None,
     media_fingerprint: str | None = None,
     input_color_space: str | None = None,
+    config_path: str | None = None,
+    config_source: str | None = None,
 ) -> SmartLayerExportResult:
     if not destination_directory.is_dir():
         raise SmartLayerExportError("Choose an existing export destination directory.")
@@ -157,6 +159,8 @@ def export_smart_layer_assets(
     try:
         staging_path.mkdir()
         exported_files: list[dict[str, Any]] = []
+        scene_source_color_space: str | None = None
+        scene_source_color_space_source: str | None = None
         if format is ExportFormat.PNG_SEQUENCE:
             for frame in render.frames:
                 source = package_path / frame.image_reference
@@ -206,7 +210,7 @@ def export_smart_layer_assets(
                 }
             )
         elif format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
-            exported_files = _export_scene_openexr_sequence(
+            exported_files, scene_tags = _export_scene_openexr_sequence(
                 staging_path=staging_path,
                 package_path=package_path,
                 render=render,
@@ -214,6 +218,10 @@ def export_smart_layer_assets(
                 scene_decoder=scene_decoder,
                 mask_loader=mask_loader,
                 input_color_space=input_color_space,
+            )
+            scene_source_color_space = scene_tags.get("source_color_space")
+            scene_source_color_space_source = scene_tags.get(
+                "source_color_space_source"
             )
         else:  # pragma: no cover - StrEnum exhaustiveness guard
             raise SmartLayerExportError(f"Unsupported export format: {format}")
@@ -229,7 +237,9 @@ def export_smart_layer_assets(
         }
         if format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
             scene_fields = build_scene_export_manifest_fields(
-                input_color_space=input_color_space,
+                source_color_space=scene_source_color_space,
+                source_color_space_source=scene_source_color_space_source,
+                interpretation_color_space=input_color_space,
                 media_fingerprint=media_fingerprint,
                 project_id=str(project.get("id")) if project.get("id") is not None else None,
                 shot_id=str(shot.get("id")) if shot.get("id") is not None else None,
@@ -242,6 +252,8 @@ def export_smart_layer_assets(
                 frame_start=int(render.frame_start),
                 frame_end=int(render.frame_end),
                 pixel_type="half",
+                config_path=config_path,
+                config_source=config_source,
             )
             manifest.update(scene_fields)
         else:
@@ -283,7 +295,7 @@ def _export_scene_openexr_sequence(
     scene_decoder: FrameDecodeService | None,
     mask_loader: Callable[[str], NDArray[np.uint8]] | None,
     input_color_space: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
     _ = package_path  # Scene pixels come from media+mask, not packaged render PNGs.
     if scene_media_path is None or scene_decoder is None or mask_loader is None:
         raise SmartLayerExportError(
@@ -311,12 +323,24 @@ def _export_scene_openexr_sequence(
             f"({exc})"
         ) from exc
 
+    first_frame = scenes.get(render.frame_start)
+    source_color_space = first_frame.color_space if first_frame is not None else None
+    source_color_space_source = (
+        first_frame.color_space_source if first_frame is not None else "unspecified"
+    )
+    source_tag_for_header = (
+        str(source_color_space).strip()
+        if source_color_space is not None and str(source_color_space).strip()
+        else "unspecified"
+    )
+
     header_meta = {
         "novaColorPolicy": "scene",
         "novaSceneLinear": "true",
         "novaAlphaMode": "straight",
-        "novaInputColorSpace": str(input_color_space or "scene_linear"),
-        "novaPixelEncoding": "scene_linear_half",
+        "novaSourceColorSpace": source_tag_for_header,
+        "novaInterpretationColorSpace": str(input_color_space or ""),
+        "novaPixelEncoding": "file_native_scene_half",
     }
     exported_files: list[dict[str, Any]] = []
     for frame in render.frames:
@@ -357,7 +381,10 @@ def _export_scene_openexr_sequence(
                 "sha256": _sha256(destination),
             }
         )
-    return exported_files
+    return exported_files, {
+        "source_color_space": source_color_space,
+        "source_color_space_source": source_color_space_source,
+    }
 
 
 def _load_sidecar_color_policy(
