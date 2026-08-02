@@ -175,8 +175,13 @@ class WorkspaceWindow(QMainWindow):
         dialog.exec()
 
     def _open_color_pipeline_diagnostics(self) -> None:
+        """View → Color Pipeline Diagnostics… (read-only runtime snapshot)."""
         dialog = ColorPipelineDiagnosticsDialog(self.controller, parent=self)
         dialog.exec()
+
+    # Alias matching Phase 9B-2 naming.
+    def _show_color_pipeline_diagnostics(self) -> None:
+        self._open_color_pipeline_diagnostics()
 
     def _build_header(self, project: Project) -> QHBoxLayout:
         layout = QHBoxLayout()

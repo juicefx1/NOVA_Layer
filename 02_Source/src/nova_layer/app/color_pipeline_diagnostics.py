@@ -550,13 +550,29 @@ def build_color_pipeline_diagnostics(
     )
 
 
-def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> str:
-    """Plain-text dump suitable for clipboard / bug reports (no Qt)."""
+def format_color_pipeline_diagnostics(
+    diagnostics: ColorPipelineDiagnostics,
+    *,
+    display_safe: bool = False,
+) -> str:
+    """Plain-text dump suitable for clipboard / bug reports (no Qt).
+
+    When ``display_safe`` is True, prefer ``transform_identity_display`` and
+    redact home-prefixed config paths (for Copy Report).
+    """
     working_hit = hit_rate(
         diagnostics.working_cache.hits,
         diagnostics.working_cache.misses,
     )
     provenance = diagnostics.provenance
+    identity = (
+        diagnostics.transform_identity_display
+        if display_safe
+        else diagnostics.transform_identity
+    )
+    config_path = diagnostics.config_path
+    if display_safe:
+        config_path = _display_safe_path(config_path)
     lines = [
         "NOVA Layer Color Pipeline Diagnostics",
         f"Backend: {diagnostics.active_backend}",
@@ -567,9 +583,8 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"Input: {diagnostics.input_color_space or '—'}",
         f"Display/View: {diagnostics.display or '—'} / {diagnostics.view or '—'}",
         f"Exposure: {diagnostics.exposure:g}",
-        f"Transform Identity: {diagnostics.transform_identity}",
-        f"Transform Identity (display): {diagnostics.transform_identity_display}",
-        f"Config: {diagnostics.config_path or '—'} "
+        f"Transform Identity: {identity}",
+        f"Config: {config_path or '—'} "
         f"(source={diagnostics.config_source or '—'})",
         f"Fallback: {diagnostics.fallback_reason or '—'}",
         f"Shot: {diagnostics.shot_name or '—'}",
