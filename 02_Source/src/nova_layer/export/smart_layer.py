@@ -130,6 +130,7 @@ def export_smart_layer_assets(
     shot: Mapping[str, Any],
     smart_layer: Mapping[str, Any],
     frame_rate: float,
+    color_policy: Mapping[str, Any] | None = None,
 ) -> SmartLayerExportResult:
     if not destination_directory.is_dir():
         raise SmartLayerExportError("Choose an existing export destination directory.")
@@ -190,7 +191,13 @@ def export_smart_layer_assets(
             )
         else:  # pragma: no cover - StrEnum exhaustiveness guard
             raise SmartLayerExportError(f"Unsupported export format: {format}")
-        manifest = {
+
+        resolved_policy = (
+            dict(color_policy)
+            if color_policy is not None
+            else _load_sidecar_color_policy(package_path, render)
+        )
+        manifest: dict[str, Any] = {
             "format": FORMAT_LABELS[format],
             "format_id": format.value,
             "project": dict(project),
@@ -199,6 +206,16 @@ def export_smart_layer_assets(
             "render": render.model_dump(mode="json"),
             "files": exported_files,
         }
+        if resolved_policy:
+            manifest["color_policy"] = resolved_policy
+            # Convenience top-level fields used by host tooling / QA.
+            if "color_policy" in resolved_policy:
+                manifest["color_policy_id"] = resolved_policy.get("color_policy")
+            manifest["alpha_mode"] = resolved_policy.get("alpha_mode", "straight")
+            manifest["premultiplied"] = resolved_policy.get("premultiplied", False)
+            manifest["scene_linear"] = resolved_policy.get("scene_linear", False)
+            if resolved_policy.get("pixel_encoding") is not None:
+                manifest["pixel_encoding"] = resolved_policy.get("pixel_encoding")
         (staging_path / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -212,3 +229,20 @@ def export_smart_layer_assets(
         format=format,
         file_count=len(exported_files),
     )
+
+
+def _load_sidecar_color_policy(
+    package_path: Path,
+    render: SmartLayerRender,
+) -> dict[str, Any] | None:
+    if not render.frames:
+        return None
+    parent = package_path / Path(render.frames[0].image_reference).parent
+    path = parent / "color_policy.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None

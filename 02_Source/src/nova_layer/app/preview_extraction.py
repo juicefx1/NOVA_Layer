@@ -5,6 +5,13 @@ from numpy.typing import NDArray
 
 
 def compose_rgba(frame: NDArray[np.uint8], mask: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Compose straight (unpremultiplied) RGBA for Smart Layer renders.
+
+    Contract:
+    - RGB channels are copied from ``frame`` unchanged (including where alpha is 0).
+    - Alpha is ``mask`` (uint8).
+    - ``premultiplied`` is False — RGB is not multiplied by A.
+    """
     if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("Preview extraction requires an RGB uint8 frame.")
     if mask.dtype != np.uint8 or mask.shape != frame.shape[:2]:

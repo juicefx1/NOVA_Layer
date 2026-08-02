@@ -37,6 +37,12 @@ from nova_layer.app.maturity import MaturityPromotionError, promote_to_productio
 from nova_layer.app.preview_extraction import compose_rgba
 from nova_layer.app.processing_frames import ProcessingColorPolicy
 from nova_layer.app.range_decode import RangeDecodeStats, decode_frame_range
+from nova_layer.app.render_color_metadata import (
+    build_render_color_metadata,
+    load_render_color_metadata,
+    validate_render_color_policy,
+    write_render_color_metadata,
+)
 from nova_layer.app.skeleton_fusion import create_fusion_candidate
 from nova_layer.app.video_extraction_service import (
     FrameExtractionInput,
@@ -108,6 +114,7 @@ class SmartLayerRenderJobOutput:
     render_version: int
     staging_path: Path
     frames: tuple[ExtractionPreview, ...]
+    color_policy_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1869,8 +1876,21 @@ class ProjectController(QObject):
 
         return BackgroundRemovalClipReadiness(True, provider_message)
 
-    def start_background_removal_clip(self) -> bool:
-        """Clip-range Background Removal → Smart Layer render commit → existing Export."""
+    def start_background_removal_clip(
+        self,
+        *,
+        color_policy: ProcessingColorPolicy = ProcessingColorPolicy.PREVIEW,
+    ) -> bool:
+        """Clip-range Background Removal → Smart Layer render commit → existing Export.
+
+        ``color_policy`` defaults to PREVIEW (viewer-look bake). Pass SOURCE for
+        look-independent final/host RGB.
+        """
+        try:
+            color_policy = validate_render_color_policy(color_policy)
+        except MediaReadError as exc:
+            self.error_occurred.emit(str(exc))
+            return False
         readiness = self.background_removal_clip_readiness()
         if not readiness.ready:
             self.error_occurred.emit(readiness.reason)
@@ -1907,6 +1927,14 @@ class ProjectController(QObject):
         staging_path = (
             package_path / "renders" / f".staging_bg_v{render_version:04d}_{uuid4().hex}"
         )
+        color_meta = build_render_color_metadata(
+            color_policy,
+            display_transform=(
+                (self._display_transform or LegacyDisplayTransform())
+                if color_policy is ProcessingColorPolicy.PREVIEW
+                else None
+            ),
+        )
 
         def operation(cancel_event: Event, report: ProgressCallback) -> object:
             generated: list[ExtractionPreview] = []
@@ -1926,6 +1954,7 @@ class ProjectController(QObject):
                     media_path,
                     shot_snapshot.range_start,
                     shot_snapshot.range_end,
+                    policy=color_policy,
                     should_cancel=cancel_event.is_set,
                     report_progress=lambda current, expected, message: report(
                         current,
@@ -1972,6 +2001,7 @@ class ProjectController(QObject):
                 if cancel_event.is_set():
                     rmtree(staging_path, ignore_errors=True)
                     return None
+                write_render_color_metadata(staging_path, color_meta)
             except Exception:
                 rmtree(staging_path, ignore_errors=True)
                 raise
@@ -1994,6 +2024,7 @@ class ProjectController(QObject):
                 render_version=render_version,
                 staging_path=staging_path,
                 frames=tuple(generated),
+                color_policy_metadata=dict(color_meta),
             )
 
         if not self._jobs.start("background_removal_clip", operation):
@@ -2001,7 +2032,16 @@ class ProjectController(QObject):
             return False
         return True
 
-    def start_smart_layer_render(self) -> bool:
+    def start_smart_layer_render(
+        self,
+        *,
+        color_policy: ProcessingColorPolicy = ProcessingColorPolicy.PREVIEW,
+    ) -> bool:
+        try:
+            color_policy = validate_render_color_policy(color_policy)
+        except MediaReadError as exc:
+            self.error_occurred.emit(str(exc))
+            return False
         shot = self.active_shot
         if shot is None or not shot.smart_layers or self._package_path is None:
             self.error_occurred.emit("No Smart Layer is available for rendering.")
@@ -2032,6 +2072,14 @@ class ProjectController(QObject):
         layer_id = layer.id
         layer_version = layer.version
         staging_path = package_path / "renders" / f".staging_v{render_version:04d}_{uuid4().hex}"
+        color_meta = build_render_color_metadata(
+            color_policy,
+            display_transform=(
+                (self._display_transform or LegacyDisplayTransform())
+                if color_policy is ProcessingColorPolicy.PREVIEW
+                else None
+            ),
+        )
 
         def operation(cancel_event: Event, report: ProgressCallback) -> object:
             generated: list[ExtractionPreview] = []
@@ -2047,6 +2095,7 @@ class ProjectController(QObject):
                     media_path,
                     shot_snapshot.range_start,
                     shot_snapshot.range_end,
+                    policy=color_policy,
                     should_cancel=cancel_event.is_set,
                     report_progress=lambda current, expected, message: report(
                         current,
@@ -2078,6 +2127,7 @@ class ProjectController(QObject):
                 if cancel_event.is_set():
                     rmtree(staging_path, ignore_errors=True)
                     return None
+                write_render_color_metadata(staging_path, color_meta)
             except Exception:
                 rmtree(staging_path, ignore_errors=True)
                 raise
@@ -2088,6 +2138,7 @@ class ProjectController(QObject):
                 render_version=render_version,
                 staging_path=staging_path,
                 frames=tuple(generated),
+                color_policy_metadata=dict(color_meta),
             )
 
         if not self._jobs.start("smart_layer_render", operation):
@@ -2320,6 +2371,17 @@ class ProjectController(QObject):
             rmtree(output.staging_path, ignore_errors=True)
             self.error_occurred.emit(f"Could not commit Smart Layer render: {exc}")
             return
+        # Ensure color policy sidecar exists (staging write may be absent on older jobs).
+        if output.color_policy_metadata:
+            write_render_color_metadata(final_path, output.color_policy_metadata)
+        elif not (final_path / "color_policy.json").is_file():
+            write_render_color_metadata(
+                final_path,
+                build_render_color_metadata(
+                    ProcessingColorPolicy.PREVIEW,
+                    display_transform=self._display_transform,
+                ),
+            )
         frames = [
             item.model_copy(update={"image_reference": f"{final_relative}/{item.image_reference}"})
             for item in output.frames
@@ -2630,6 +2692,7 @@ class ProjectController(QObject):
                 },
                 smart_layer={"id": str(layer.id), "name": layer.name},
                 frame_rate=shot.media.frame_rate,
+                color_policy=load_render_color_metadata(self._package_path, render),
             )
         except (OSError, ValueError, SmartLayerExportError, FileNotFoundError) as exc:
             self.error_occurred.emit(f"Smart Layer export failed: {exc}")
