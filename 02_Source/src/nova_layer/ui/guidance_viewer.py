@@ -56,6 +56,10 @@ class GuidanceViewer(QLabel):
         self._false_color_frame: NDArray[np.uint8] | None = None
         self._false_color_legend: list[tuple[str, tuple[int, int, int]]] = []
         self._show_false_color_legend = False
+        self._performance_hud_enabled = False
+        self._performance_hud_lines: tuple[object, ...] = ()
+        self._performance_hud_opacity = 0.85
+        self._performance_hud_signature: str | None = None
         self._image: QImage | None = None
         self._mask_overlay: QImage | None = None
         self._display_rect = QRect()
@@ -176,6 +180,33 @@ class GuidanceViewer(QLabel):
     def clear_false_color(self) -> None:
         self.set_false_color_frame(None, legend=None, show_legend=False)
 
+    def set_performance_hud(
+        self,
+        *,
+        enabled: bool,
+        lines: tuple[object, ...] | list[object] | None = None,
+        opacity: float = 0.85,
+        signature: str | None = None,
+    ) -> None:
+        """Show/hide read-only Performance HUD overlay (does not touch frame buffers)."""
+        opacity = max(0.0, min(1.0, float(opacity)))
+        new_lines = tuple(lines or ())
+        if (
+            bool(enabled) == self._performance_hud_enabled
+            and new_lines == self._performance_hud_lines
+            and abs(opacity - self._performance_hud_opacity) < 1e-6
+            and signature == self._performance_hud_signature
+        ):
+            return
+        self._performance_hud_enabled = bool(enabled)
+        self._performance_hud_lines = new_lines
+        self._performance_hud_opacity = opacity
+        self._performance_hud_signature = signature
+        self.update()
+
+    def clear_performance_hud(self) -> None:
+        self.set_performance_hud(enabled=False, lines=(), signature=None)
+
     def _rebuild_display_image(self) -> None:
         display = (
             self._false_color_frame
@@ -294,43 +325,86 @@ class GuidanceViewer(QLabel):
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
-        if self._image is None:
-            return
         painter = QPainter(self)
-        self._update_display_rect()
-        pixmap = QPixmap.fromImage(self._image).scaled(
-            self._display_rect.size(),
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.drawPixmap(self._display_rect, pixmap)
-        if self._mask_overlay is not None:
-            overlay = QPixmap.fromImage(self._mask_overlay).scaled(
+        if self._image is not None:
+            self._update_display_rect()
+            pixmap = QPixmap.fromImage(self._image).scaled(
                 self._display_rect.size(),
                 Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            painter.drawPixmap(self._display_rect, overlay)
-        if self._show_false_color_legend and self._false_color_legend:
-            self._paint_false_color_legend(painter)
-        self._paint_guidance(painter)
+            painter.drawPixmap(self._display_rect, pixmap)
+            if self._mask_overlay is not None:
+                overlay = QPixmap.fromImage(self._mask_overlay).scaled(
+                    self._display_rect.size(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(self._display_rect, overlay)
+            if self._show_false_color_legend and self._false_color_legend:
+                self._paint_false_color_legend(painter)
+            self._paint_guidance(painter)
+        if self._performance_hud_enabled and self._performance_hud_lines:
+            self._paint_performance_hud(painter)
 
     def _paint_false_color_legend(self, painter: QPainter) -> None:
+        """Legend at top-right so Performance HUD can occupy top-left."""
         if self._display_rect.isEmpty():
             return
-        x = self._display_rect.left() + 8
-        y = self._display_rect.top() + 8
+        width = 168
         row_h = 16
-        box = 10
+        height = 8 + len(self._false_color_legend) * row_h
+        x = self._display_rect.right() - width - 4
+        y = self._display_rect.top() + 8
         painter.setPen(QPen(QColor("#111318"), 1))
         bg = QColor(17, 19, 24, 180)
-        height = 8 + len(self._false_color_legend) * row_h
-        painter.fillRect(QRect(x - 4, y - 4, 168, height), bg)
+        painter.fillRect(QRect(x - 4, y - 4, width, height), bg)
         for label, color in self._false_color_legend:
-            painter.fillRect(x, y + 2, box, box, QColor(*color))
+            painter.fillRect(x, y + 2, 10, 10, QColor(*color))
             painter.setPen(QColor("#e8ecf4"))
-            painter.drawText(x + box + 6, y + box, label)
+            painter.drawText(x + 16, y + 10, label)
             y += row_h
+
+    def _paint_performance_hud(self, painter: QPainter) -> None:
+        """Compact/expanded diagnostics panel at top-left of the viewer."""
+        from nova_layer.ui.performance_hud import HudLine
+
+        lines: list[HudLine] = []
+        for item in self._performance_hud_lines:
+            if isinstance(item, HudLine):
+                lines.append(item)
+            else:
+                lines.append(HudLine(str(item)))
+        if not lines:
+            return
+
+        margin = 8
+        row_h = 14
+        pad = 6
+        max_width = max(160, min(self.width() - 2 * margin, 320))
+        text_width = max_width - 2 * pad
+        metrics = painter.fontMetrics()
+        elided = [
+            metrics.elidedText(line.text, Qt.TextElideMode.ElideRight, text_width)
+            for line in lines
+        ]
+        box_h = pad * 2 + len(elided) * row_h
+        box_w = max_width
+        # Prefer image top-left; fall back to widget origin when no frame yet.
+        if not self._display_rect.isEmpty():
+            x = self._display_rect.left() + margin
+            y = self._display_rect.top() + margin
+        else:
+            x = margin
+            y = margin
+        alpha = int(round(255 * self._performance_hud_opacity))
+        painter.fillRect(QRect(x, y, box_w, box_h), QColor(17, 19, 24, alpha))
+        ty = y + pad + row_h - 3
+        for index, line in enumerate(lines):
+            color = QColor("#ffb347") if line.warn else QColor("#e8ecf4")
+            painter.setPen(color)
+            painter.drawText(x + pad, ty, elided[index])
+            ty += row_h
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

@@ -53,6 +53,11 @@ from nova_layer.ui.false_color_controls import FalseColorControlsPanel
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.histogram_panel import HistogramPanel
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
+from nova_layer.ui.performance_hud import (
+    PerformanceHudSettings,
+    format_performance_hud_lines,
+    format_performance_hud_text,
+)
 from nova_layer.ui.pixel_inspector import PixelInspectorPanel
 from nova_layer.ui.validation_dialog import ValidationDialog
 
@@ -95,6 +100,12 @@ class WorkspaceWindow(QMainWindow):
         self._false_color_refresh_timer.setSingleShot(True)
         self._false_color_refresh_timer.setInterval(120)
         self._false_color_refresh_timer.timeout.connect(self._flush_false_color_refresh)
+        self._performance_hud_settings = PerformanceHudSettings()
+        self._performance_hud_timer = QTimer(self)
+        self._performance_hud_timer.setSingleShot(True)
+        self._performance_hud_timer.setInterval(250)
+        self._performance_hud_timer.timeout.connect(self._flush_performance_hud)
+        self._last_performance_hud_signature: str | None = None
         self.setObjectName("workspaceWindow")
         self.setWindowTitle(f"{project.name} — NOVA Layer")
         self.resize(1280, 820)
@@ -165,6 +176,7 @@ class WorkspaceWindow(QMainWindow):
         self._last_color_application = application
         self._schedule_histogram_refresh()
         self._schedule_false_color_refresh()
+        self._schedule_performance_hud_refresh()
         return application
 
     @property
@@ -209,6 +221,82 @@ class WorkspaceWindow(QMainWindow):
         self.false_color_action.setCheckable(True)
         self.false_color_action.setChecked(False)
         self.false_color_action.toggled.connect(self._set_false_color_visible)
+        self.performance_hud_action = view_menu.addAction("Performance HUD")
+        self.performance_hud_action.setObjectName("performanceHudAction")
+        self.performance_hud_action.setCheckable(True)
+        self.performance_hud_action.setChecked(False)
+        self.performance_hud_action.toggled.connect(self._toggle_performance_hud)
+        self.performance_hud_expanded_action = view_menu.addAction(
+            "Performance HUD Expanded"
+        )
+        self.performance_hud_expanded_action.setObjectName(
+            "performanceHudExpandedAction"
+        )
+        self.performance_hud_expanded_action.setCheckable(True)
+        self.performance_hud_expanded_action.setChecked(False)
+        self.performance_hud_expanded_action.toggled.connect(
+            self._toggle_performance_hud_expanded
+        )
+
+    def _toggle_performance_hud(self, enabled: bool) -> None:
+        self._performance_hud_settings = PerformanceHudSettings(
+            enabled=bool(enabled),
+            compact=self._performance_hud_settings.compact,
+            opacity=self._performance_hud_settings.opacity,
+        )
+        if not enabled:
+            self._performance_hud_timer.stop()
+            self._last_performance_hud_signature = None
+            self.viewer.clear_performance_hud()
+            return
+        self._refresh_performance_hud()
+
+    def _toggle_performance_hud_expanded(self, expanded: bool) -> None:
+        self._performance_hud_settings = PerformanceHudSettings(
+            enabled=self._performance_hud_settings.enabled,
+            compact=not bool(expanded),
+            opacity=self._performance_hud_settings.opacity,
+        )
+        if self._performance_hud_settings.enabled:
+            self._refresh_performance_hud()
+
+    def _schedule_performance_hud_refresh(self, *, force: bool = False) -> None:
+        if not self._performance_hud_settings.enabled:
+            return
+        if force:
+            self._performance_hud_timer.start(0)
+        elif not self._performance_hud_timer.isActive():
+            self._performance_hud_timer.start()
+
+    def _flush_performance_hud(self) -> None:
+        if not self._performance_hud_settings.enabled:
+            return
+        self._refresh_performance_hud()
+
+    def _refresh_performance_hud(self) -> None:
+        if not self._performance_hud_settings.enabled:
+            return
+        diagnostics = self.controller.color_pipeline_diagnostics
+        signature = format_performance_hud_text(
+            diagnostics,
+            compact=self._performance_hud_settings.compact,
+        )
+        if (
+            signature == self._last_performance_hud_signature
+            and self.viewer._performance_hud_enabled
+        ):
+            return
+        lines = format_performance_hud_lines(
+            diagnostics,
+            compact=self._performance_hud_settings.compact,
+        )
+        self._last_performance_hud_signature = signature
+        self.viewer.set_performance_hud(
+            enabled=True,
+            lines=lines,
+            opacity=self._performance_hud_settings.opacity,
+            signature=signature,
+        )
 
     def _build_pixel_inspector_dock(self) -> None:
         self.pixel_inspector_panel = PixelInspectorPanel()
@@ -911,6 +999,7 @@ class WorkspaceWindow(QMainWindow):
             self._schedule_pixel_inspection(*self._pixel_hover_xy)
         self._schedule_histogram_refresh()
         self._schedule_false_color_refresh()
+        self._schedule_performance_hud_refresh()
 
     def _timeline_changed(self, frame_number: int) -> None:
         self._discard_skeleton_correction()

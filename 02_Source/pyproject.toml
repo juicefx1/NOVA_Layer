@@ -69,6 +69,7 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-q -m 'not real_model and not real_host'"
 markers = [
   "real_model: optional local SAM/model smoke tests (require artefacts; not in default run)",

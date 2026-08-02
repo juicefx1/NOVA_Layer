@@ -180,16 +180,21 @@ def test_refresh_does_not_change_cache_hits(
     shot = project_controller.import_media(seq)
     assert shot is not None
     path = Path(shot.media.source_path)
-    project_controller._frame_decoder.get_preview_frame(
-        path, 0, schedule_prefetch=False
-    )
+    decoder = project_controller._frame_decoder
+    decoder._prefetch_count = 0
+    with decoder._lock:
+        decoder._prefetch_generation += 1
+    decoder.get_preview_frame(path, 0, schedule_prefetch=False)
+    from PySide6.QtCore import QThreadPool
 
-    before = project_controller._frame_decoder.pipeline.raw_cache_stats
+    QThreadPool.globalInstance().waitForDone(2000)
+
+    before = decoder.pipeline.raw_cache_stats
     dialog = ColorPipelineDiagnosticsDialog(project_controller)
     qtbot.addWidget(dialog)  # type: ignore[attr-defined]
     dialog.refresh()
     dialog.refresh()
-    after = project_controller._frame_decoder.pipeline.raw_cache_stats
+    after = decoder.pipeline.raw_cache_stats
     assert after.hits == before.hits
     assert after.misses == before.misses
 
