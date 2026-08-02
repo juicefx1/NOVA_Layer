@@ -9,6 +9,11 @@
 02_Source/.pytest_cache/
 02_Source/.ruff_cache/
 **/__pycache__/
+*.pyc
+
+# Local packaging / scratch artifacts
+dist/
+**/tmp_sequence_test/
 
 # macOS
 .DS_Store
