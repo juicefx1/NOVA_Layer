@@ -54,6 +54,7 @@ from nova_layer.app.render_color_metadata import (
     write_render_color_metadata,
 )
 from nova_layer.app.skeleton_fusion import create_fusion_candidate
+from nova_layer.app.working_space import WorkingSpaceSettings
 from nova_layer.app.video_extraction_service import (
     FrameExtractionInput,
     PROVIDER_ID as BACKGROUND_REMOVAL_PROVIDER_ID,
@@ -361,6 +362,12 @@ class ProjectController(QObject):
             shot_name=shot_name,
             last_render_color_policy=policy,
             active_policy="preview",
+            working_settings=(
+                None if pipeline is None else pipeline.working_space_settings
+            ),
+            working_cache_stats=(
+                None if pipeline is None else pipeline.working_cache_stats
+            ),
         )
 
     def _peek_last_render_color_policy(self, shot: Shot) -> str | None:
@@ -410,6 +417,27 @@ class ProjectController(QObject):
         if shot is None or shot.media.source_path is None:
             return
 
+        if shot.media.link_state != MediaLinkState.LINKED:
+            return
+
+        frames: list[int] = []
+        if self._preview_frame_number is not None:
+            frames.append(self._preview_frame_number)
+        if shot.master_frame not in frames:
+            frames.append(shot.master_frame)
+        for frame_number in frames:
+            self.request_frame(frame_number)
+
+    def set_working_space_settings(
+        self,
+        settings: WorkingSpaceSettings | None,
+    ) -> None:
+        """Runtime opt-in working space; keep raw/SOURCE; clear working+preview."""
+        self._frame_decoder.set_working_space_settings(settings)
+
+        shot = self.active_shot
+        if shot is None or shot.media.source_path is None:
+            return
         if shot.media.link_state != MediaLinkState.LINKED:
             return
 

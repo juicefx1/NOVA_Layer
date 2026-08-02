@@ -27,6 +27,7 @@ from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_CACHE_MAX_BYTES,
     DEFAULT_RAW_FRAME_CACHE_SIZE,
 )
+from nova_layer.app.working_space import WorkingSpaceSettings
 from nova_layer.ports.media import MediaReader
 from nova_layer.ports.scene_frames import SceneFrame
 
@@ -121,6 +122,7 @@ class FrameDecodeService(QObject):
         prefetch_count: int = _DEFAULT_PREFETCH_COUNT,
         thread_pool: QThreadPool | None = None,
         pipeline: PreviewPipeline | None = None,
+        working_space_settings: WorkingSpaceSettings | None = None,
     ) -> None:
         super().__init__()
         if prefetch_count < 0:
@@ -138,6 +140,7 @@ class FrameDecodeService(QObject):
             preview_cache_size=entries,
             raw_cache_max_bytes=raw_cache_max_bytes,
             preview_cache_max_bytes=preview_cache_max_bytes,
+            working_space_settings=working_space_settings,
         )
         self._prefetch_count = prefetch_count
         self._prefetch_generation = 0
@@ -182,6 +185,16 @@ class FrameDecodeService(QObject):
         """Update color transform; keep EXR raw cache, clear preview cache."""
         with self._lock:
             self._pipeline.set_display_transform(transform)
+            self._request_id += 1
+            self._prefetch_generation += 1
+
+    def set_working_space_settings(
+        self,
+        settings: WorkingSpaceSettings | None,
+    ) -> None:
+        """Opt-in working-space settings; keep raw/SOURCE, clear working+preview."""
+        with self._lock:
+            self._pipeline.set_working_space_settings(settings)
             self._request_id += 1
             self._prefetch_generation += 1
 
@@ -282,6 +295,10 @@ class FrameDecodeService(QObject):
         return self._pipeline.source_cache_stats
 
     @property
+    def working_cache_stats(self) -> FrameCacheStats:
+        return self._pipeline.working_cache_stats
+
+    @property
     def color_pipeline_diagnostics(self) -> ColorPipelineDiagnostics:
         """Read-only Viewer Color Pipeline snapshot (cache + transform identity)."""
         transform = self._pipeline.display_transform
@@ -293,6 +310,8 @@ class FrameDecodeService(QObject):
             pipeline=self._pipeline,
             transform_diagnostics=transform_diagnostics,
             transform_identity=self._pipeline.transform_identity,
+            working_settings=self._pipeline.working_space_settings,
+            working_cache_stats=self._pipeline.working_cache_stats,
         )
 
     def clear(self) -> None:

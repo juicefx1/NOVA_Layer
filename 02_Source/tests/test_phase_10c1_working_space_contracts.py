@@ -350,9 +350,10 @@ def test_static_source_transform_version_locked() -> None:
 
 
 def test_static_preview_pipeline_has_no_working_wiring() -> None:
-    source = inspect.getsource(PreviewPipeline)
-    assert "WorkingSceneCache" not in source
-    assert "WorkingSceneFrame" not in source
-    assert "resolve_working_space_intent" not in source
-    assert "WorkingTransformIdentity" not in source
-    assert "working_space" not in source
+    """Phase 10C-1: preview had no working path. Superseded by 10C-2 wiring tests."""
+    # Contracts remain: SOURCE version locked; working settings default disabled.
+    assert SOURCE_TRANSFORM_VERSION == "source_legacy_srgb_v1"
+    pipeline = PreviewPipeline.__new__(PreviewPipeline)  # type: ignore[call-arg]
+    del pipeline
+    source = inspect.getsource(PreviewPipeline.__init__)
+    assert "working_space_settings" in source

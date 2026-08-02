@@ -144,8 +144,13 @@ Cache objects:
 | Media relink | **clear** | **clear** | **clear** | **clear** |
 
 Phase 10C-1 ships `WorkingSpaceSettings`, `WorkingTransformIdentity`,
-`WorkingSceneFrame`, and `WorkingSceneCache` **without** connecting them to
-`PreviewPipeline` or converting pixels.
+`WorkingSceneFrame`, and `WorkingSceneCache`.
+
+**Phase 10C-2** adds float→float `OcioColorSpaceConverter` and optional PREVIEW
+wiring: when `WorkingSpaceSettings.enabled`, EXR preview goes
+`SceneFrame → WorkingSceneFrame → Exposure → DisplayView(src=working)`.
+Defaults remain disabled (file-native → DisplayView with interpretation ICS).
+SOURCE v1 and True Scene file-native export are unchanged.
 
 ---
 
@@ -198,10 +203,11 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
 7. **`ProcessingColorPolicy.SCENE` remains rejected for Smart Layer render.**
    True Scene is export-only.
 8. **Canonical working-space conversion** is staged:
-   - **Phase 10C-1:** contracts / identity / diagnostics / cache skeleton only
-     (`WorkingSpaceSettings`, `WorkingSceneFrame`, `WorkingSceneCache`);
-     `working_enabled=false` by default; **no** source→working pixel convert.
-   - **Phase 10C-2+:** optional Working path for PREVIEW, then SOURCE v2 / export.
+   - **Phase 10C-1:** contracts / identity / diagnostics / cache skeleton
+   - **Phase 10C-2:** `OcioColorSpaceConverter` + opt-in PREVIEW working path
+     (`WorkingSpaceSettings.enabled=False` by default); SOURCE v1 / True Scene
+     file-native unchanged
+   - **Later:** SOURCE v2 / working export (opt-in)
 
 ---
 

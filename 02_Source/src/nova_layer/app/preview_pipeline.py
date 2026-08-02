@@ -10,10 +10,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from nova_layer.adapters.color.display_transform import (
+    ColorTransformError,
     DisplayTransformDiagnostics,
     DisplayTransformProtocol,
     LegacyDisplayTransform,
+    ViewerDisplayTransform,
+    create_display_transform,
 )
+from nova_layer.adapters.color.exposure_transform import ExposureTransform
 from nova_layer.app.frame_cache_stats import (
     FrameCacheStats,
     PreviewPipelineStats,
@@ -28,8 +32,17 @@ from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_FRAME_CACHE_SIZE,
     RawFrameCache,
 )
+from nova_layer.app.working_scene_cache import WorkingSceneCache
+from nova_layer.app.working_space import (
+    WORKING_CONVERTER_VERSION,
+    ResolvedWorkingSpace,
+    WorkingSpaceSettings,
+    WorkingTransformIdentity,
+    resolve_working_source_color_space,
+    resolve_working_space,
+)
 from nova_layer.ports.media import MediaReadError, MediaReader
-from nova_layer.ports.scene_frames import SceneFrame
+from nova_layer.ports.scene_frames import SceneFrame, WorkingSceneFrame
 
 # Entry-count soft cap (legacy ``preview_cache_size`` / ``cache_size``).
 DEFAULT_PREVIEW_CACHE_SIZE = 32
@@ -267,11 +280,11 @@ def _resolve_path(path: Path) -> Path:
 
 
 class PreviewPipeline:
-    """EXR raw cache → display transform → uint8 preview cache.
+    """EXR raw cache → (optional working) → display transform → uint8 preview.
 
     Lock order (never invert): ``PreviewPipeline._lock`` → cache locks
-    (RawFrameCache / PreviewFrameCache). OIIO decode runs **without** holding
-    ``_lock``; miss paths re-check under lock after decode.
+    (RawFrameCache / WorkingSceneCache / PreviewFrameCache). OIIO decode runs
+    **without** holding ``_lock``; miss paths re-check under lock after decode.
     """
 
     def __init__(
@@ -284,10 +297,16 @@ class PreviewPipeline:
         raw_cache_max_bytes: int | None = None,
         preview_cache_max_bytes: int | None = None,
         raw_cache: RawFrameCache | None = None,
+        working_space_settings: WorkingSpaceSettings | None = None,
+        working_cache: WorkingSceneCache | None = None,
+        color_space_converter_cls: type | None = None,
     ) -> None:
         self._reader = reader
         self._display_transform = display_transform or LegacyDisplayTransform()
-        self._transform_id = TransformIdentity.from_transform(self._display_transform)
+        self._session_transform_id = TransformIdentity.from_transform(
+            self._display_transform
+        )
+        self._interpretation_color_space = self._session_transform_id.input_color_space
         if raw_cache is not None:
             self._raw_cache = raw_cache
         else:
@@ -315,6 +334,15 @@ class PreviewPipeline:
             max_bytes=preview_bytes,
         )
         self._source_display = LegacyDisplayTransform()
+        self._working_settings = working_space_settings or WorkingSpaceSettings()
+        self._working_cache = working_cache or WorkingSceneCache()
+        self._color_space_converter_cls = color_space_converter_cls
+        self._resolved_working = self._resolve_working_unlocked()
+        self._working_preview_transform = self._build_working_preview_transform_unlocked()
+        self._transform_id = self._effective_preview_identity_unlocked()
+        self._working_warnings: tuple[str, ...] = self._resolved_working.warnings
+        self._last_working_conversion_applied = False
+        self._last_working_source_color_space: str | None = None
         self._lock = Lock()
         self._scene_load_lock = Lock()
         self._raw_decodes = 0
@@ -322,6 +350,7 @@ class PreviewPipeline:
         self._source_generations = 0
         self._raw_prefetch_skips = 0
         self._preview_prefetch_skips = 0
+        self._working_conversions = 0
 
     @property
     def reader(self) -> MediaReader:
@@ -361,6 +390,43 @@ class PreviewPipeline:
         return self._source_cache.stats()
 
     @property
+    def working_cache_stats(self) -> FrameCacheStats:
+        return self._working_cache.stats()
+
+    @property
+    def working_space_settings(self) -> WorkingSpaceSettings:
+        return self._working_settings
+
+    @property
+    def resolved_working_space(self) -> ResolvedWorkingSpace:
+        with self._lock:
+            return self._resolved_working
+
+    @property
+    def interpretation_color_space(self) -> str | None:
+        with self._lock:
+            return self._interpretation_color_space
+
+    @property
+    def working_warnings(self) -> tuple[str, ...]:
+        with self._lock:
+            return self._working_warnings
+
+    @property
+    def last_working_conversion_applied(self) -> bool:
+        with self._lock:
+            return self._last_working_conversion_applied
+
+    @property
+    def last_working_source_color_space(self) -> str | None:
+        with self._lock:
+            return self._last_working_source_color_space
+
+    @property
+    def working_conversions(self) -> int:
+        return self._working_conversions
+
+    @property
     def pipeline_stats(self) -> PreviewPipelineStats:
         return PreviewPipelineStats(
             raw_decodes=self._raw_decodes,
@@ -374,29 +440,74 @@ class PreviewPipeline:
             self._reader = reader
             self._preview_cache.clear()
             self._source_cache.clear()
+            self._working_cache.clear()
             if not keep_raw_cache:
                 self._raw_cache.clear()
 
     def set_display_transform(self, transform: DisplayTransformProtocol | None) -> None:
-        """Swap exposure/display path; keep EXR raw + SOURCE caches, drop preview.
+        """Swap exposure/display path; keep EXR raw + SOURCE; drop preview.
 
-        Lifetime counters (hits/misses/…) on caches are retained; preview
-        ``count`` / ``current_bytes`` go to 0 via ``clear()``. SOURCE stable
-        uint8 bake is independent of session viewer transform.
+        Working cache is cleared only when interpretation ICS or OCIO config
+        identity changes (Exposure / Display / View alone keep working).
         """
         with self._lock:
+            old_ics = self._interpretation_color_space
+            old_config = (
+                self._session_transform_id.config_path,
+                self._session_transform_id.config_source,
+            )
             self._display_transform = transform or LegacyDisplayTransform()
-            self._transform_id = TransformIdentity.from_transform(self._display_transform)
+            self._session_transform_id = TransformIdentity.from_transform(
+                self._display_transform
+            )
+            new_ics = self._session_transform_id.input_color_space
+            new_config = (
+                self._session_transform_id.config_path,
+                self._session_transform_id.config_source,
+            )
+            self._interpretation_color_space = new_ics
+            ics_changed = old_ics != new_ics
+            config_changed = old_config != new_config
+            if ics_changed or config_changed:
+                self._working_cache.clear()
+            if config_changed:
+                self._resolved_working = self._resolve_working_unlocked()
+            self._working_preview_transform = (
+                self._build_working_preview_transform_unlocked()
+            )
+            self._transform_id = self._effective_preview_identity_unlocked()
+            self._working_warnings = self._resolved_working.warnings
+            self._preview_cache.clear()
+
+    def set_working_space_settings(
+        self,
+        settings: WorkingSpaceSettings | None,
+    ) -> None:
+        """Update working-space opt-in; keep raw + SOURCE; clear working + preview."""
+        with self._lock:
+            self._working_settings = settings or WorkingSpaceSettings()
+            self._resolved_working = self._resolve_working_unlocked()
+            self._working_preview_transform = (
+                self._build_working_preview_transform_unlocked()
+            )
+            self._transform_id = self._effective_preview_identity_unlocked()
+            self._working_warnings = self._resolved_working.warnings
+            self._working_cache.clear()
             self._preview_cache.clear()
 
     def clear_preview_cache(self) -> None:
         with self._lock:
             self._preview_cache.clear()
 
+    def clear_working_cache(self) -> None:
+        with self._lock:
+            self._working_cache.clear()
+
     def clear_all(self) -> None:
         with self._lock:
             self._preview_cache.clear()
             self._source_cache.clear()
+            self._working_cache.clear()
             self._raw_cache.clear()
 
     def read_frame(
@@ -414,16 +525,29 @@ class PreviewPipeline:
             if cached is not None:
                 return cached
             transform = self._display_transform
+            working_enabled = self._resolved_working.enabled
+            working_transform = self._working_preview_transform
             reader = self._reader
 
         if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
             reader, resolved, frame_number
         ):
-            scene = self._get_or_load_scene(reader, resolved, frame_number)
-            try:
-                preview = transform.apply(scene.pixels)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Could not display-transform scene frame: {exc}") from exc
+            if working_enabled and working_transform is not None:
+                working = self._get_working_scene_frame(resolved, frame_number)
+                try:
+                    preview = working_transform.apply(working.pixels)
+                except (TypeError, ValueError, ColorTransformError) as exc:
+                    raise RuntimeError(
+                        f"Could not display-transform working scene frame: {exc}"
+                    ) from exc
+            else:
+                scene = self._get_or_load_scene(reader, resolved, frame_number)
+                try:
+                    preview = transform.apply(scene.pixels)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Could not display-transform scene frame: {exc}"
+                    ) from exc
             self._preview_generations += 1
         else:
             preview = reader.read_frame(resolved, frame_number)
@@ -464,6 +588,14 @@ class PreviewPipeline:
                 f"Could not load scene frame {frame_number} from {resolved}."
             )
         return scene
+
+    def get_working_scene_frame(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> WorkingSceneFrame:
+        """Return canonical working-space float RGB (opt-in; raises if disabled/unresolved)."""
+        return self._get_working_scene_frame(_resolve_path(path), frame_number)
 
     def source_color_space_warning(
         self,
@@ -674,24 +806,188 @@ class PreviewPipeline:
         """Like read_frame but does not write the preview cache (caller decides)."""
         with self._lock:
             transform = self._display_transform
+            working_enabled = self._resolved_working.enabled
+            working_transform = self._working_preview_transform
             reader = self._reader
             tid = self._transform_id
 
         if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
             reader, resolved, frame_number
         ):
-            scene = self._get_or_load_scene(
-                reader, resolved, frame_number, allow_eviction=False
-            )
-            if scene is None:
-                raise RuntimeError("raw prefetch could not admit scene frame")
-            preview = transform.apply(scene.pixels)
+            if working_enabled and working_transform is not None:
+                working = self._get_working_scene_frame(resolved, frame_number)
+                preview = working_transform.apply(working.pixels)
+            else:
+                scene = self._get_or_load_scene(
+                    reader, resolved, frame_number, allow_eviction=False
+                )
+                if scene is None:
+                    raise RuntimeError("raw prefetch could not admit scene frame")
+                preview = transform.apply(scene.pixels)
             self._preview_generations += 1
         else:
             preview = reader.read_frame(resolved, frame_number)
             self._preview_generations += 1
         del tid
         return np.ascontiguousarray(preview, dtype=np.uint8)
+
+    def _resolve_working_unlocked(self) -> ResolvedWorkingSpace:
+        tid = self._session_transform_id
+        config_path = Path(tid.config_path) if tid.config_path else None
+        return resolve_working_space(
+            self._working_settings,
+            ocio_config_path=config_path,
+            ocio_config_source=tid.config_source,
+        )
+
+    def _effective_preview_identity_unlocked(self) -> TransformIdentity:
+        if self._working_preview_transform is not None:
+            return TransformIdentity.from_transform(self._working_preview_transform)
+        return TransformIdentity.from_transform(self._display_transform)
+
+    def _build_working_preview_transform_unlocked(
+        self,
+    ) -> DisplayTransformProtocol | None:
+        resolved = self._resolved_working
+        if not resolved.enabled or not resolved.working_color_space:
+            return None
+        tid = self._session_transform_id
+        # Prefer OCIO when the session transform is OCIO; otherwise Legacy with
+        # diagnostics.input_color_space = working (no DisplayView double-ICS).
+        exposure_stops = float(tid.exposure)
+        prefer_ocio = tid.backend == "ocio" and tid.config_path is not None
+        config_path = Path(tid.config_path) if tid.config_path else None
+        if prefer_ocio:
+            return create_display_transform(
+                prefer_ocio=True,
+                config_path=config_path,
+                input_color_space=resolved.working_color_space,
+                display=tid.display,
+                view=tid.view,
+                exposure=exposure_stops,
+            )
+        return ViewerDisplayTransform(
+            exposure=ExposureTransform(exposure_stops),
+            display_transform=LegacyDisplayTransform(
+                diagnostics=DisplayTransformDiagnostics(
+                    backend="legacy",
+                    ocio_available=False,
+                    config_path=tid.config_path,
+                    config_source=tid.config_source,
+                    display=tid.display,
+                    view=tid.view,
+                    input_color_space=resolved.working_color_space,
+                    exposure=0.0,
+                    fallback_reason=None,
+                )
+            ),
+        )
+
+    def _get_working_scene_frame(
+        self,
+        resolved: Path,
+        frame_number: int,
+    ) -> WorkingSceneFrame:
+        with self._lock:
+            resolved_working = self._resolved_working
+            interpretation = self._interpretation_color_space
+            converter_cls = self._color_space_converter_cls
+            reader = self._reader
+
+        if not resolved_working.enabled or not resolved_working.working_color_space:
+            raise MediaReadError(
+                "Working scene frames require an enabled, resolved working color space."
+            )
+        if not resolved_working.ocio_config_identity:
+            raise MediaReadError(
+                "Working scene frames require an OCIO config identity."
+            )
+        if not _is_scene_frame_source(reader):
+            raise MediaReadError(
+                "Working scene frames require a SceneFrameSource media reader."
+            )
+        scene = self._get_or_load_scene(reader, resolved, frame_number)
+        if scene is None:
+            raise MediaReadError(
+                f"Could not load scene frame {frame_number} from {resolved}."
+            )
+
+        source_cs, source_warnings = resolve_working_source_color_space(
+            scene.color_space,
+            interpretation,
+        )
+        with self._lock:
+            self._working_warnings = tuple(
+                dict.fromkeys((*self._resolved_working.warnings, *source_warnings))
+            )
+            self._last_working_source_color_space = source_cs
+
+        if source_cs is None:
+            raise MediaReadError(
+                "Working conversion source unresolved: SceneFrame.color_space and "
+                "interpretation_color_space are both missing."
+            )
+
+        identity = WorkingTransformIdentity.try_create(
+            source_color_space=source_cs,
+            working_color_space=resolved_working.working_color_space,
+            ocio_config_identity=resolved_working.ocio_config_identity,
+            converter_version=resolved_working.converter_version,
+        )
+        if identity is None:
+            raise MediaReadError("Could not build WorkingTransformIdentity.")
+
+        cached = self._working_cache.get(resolved, frame_number, identity)
+        if cached is not None:
+            with self._lock:
+                self._last_working_conversion_applied = (
+                    identity.source_color_space != identity.working_color_space
+                )
+            return cached
+
+        converter_type = converter_cls
+        if converter_type is None:
+            from nova_layer.adapters.color.ocio_color_space_converter import (
+                OcioColorSpaceConverter,
+            )
+
+            converter_type = OcioColorSpaceConverter
+
+        config_path = (
+            Path(resolved_working.config_path)
+            if resolved_working.config_path
+            else None
+        )
+        try:
+            converter = converter_type(
+                config_path=config_path,
+                source_color_space=source_cs,
+                working_color_space=resolved_working.working_color_space,
+            )
+            pixels = converter.apply(scene.pixels)
+        except (ColorTransformError, TypeError, ValueError) as exc:
+            raise MediaReadError(
+                f"Working color-space conversion failed for frame {frame_number}: {exc}"
+            ) from exc
+
+        self._working_conversions += 1
+        frame = WorkingSceneFrame(
+            path=resolved,
+            frame_number=frame_number,
+            pixels=np.ascontiguousarray(pixels, dtype=np.float32),
+            width=int(pixels.shape[1]),
+            height=int(pixels.shape[0]),
+            source_color_space=identity.source_color_space,
+            working_color_space=identity.working_color_space,
+            ocio_config_identity=identity.ocio_config_identity,
+            converter_version=identity.converter_version,
+        )
+        self._working_cache.put(frame, allow_eviction=True)
+        with self._lock:
+            self._last_working_conversion_applied = (
+                identity.source_color_space != identity.working_color_space
+            )
+        return frame
 
     def _get_or_load_scene(
         self,

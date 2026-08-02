@@ -125,7 +125,7 @@ class ColorPipelineDiagnostics:
     interpretation_color_space: str | None = None
     source_transform_warning: str | None = None
 
-    # Phase 10C-1 — working-space intent (no conversion yet).
+    # Phase 10C — working-space intent / runtime resolve.
     working_enabled: bool = False
     requested_working_color_space: str | None = None
     resolved_working_color_space: str | None = None
@@ -133,6 +133,8 @@ class ColorPipelineDiagnostics:
     working_converter_version: str | None = None
     working_cache: FrameCacheStats = field(default=_EMPTY_CACHE)
     working_warnings: tuple[str, ...] = ()
+    working_source_color_space: str | None = None
+    working_conversion_applied: bool | None = None
 
 
 def empty_frame_cache_stats() -> FrameCacheStats:
@@ -234,8 +236,58 @@ def build_color_pipeline_diagnostics(
     if src_warn and src_warn not in warnings:
         warnings.append(src_warn)
 
-    intent = resolve_working_space_intent(working_settings)
-    working_cache = working_cache_stats if working_cache_stats is not None else _EMPTY_CACHE
+    intent = resolve_working_space_intent(
+        working_settings
+        if working_settings is not None
+        else (None if pipeline is None else pipeline.working_space_settings)
+    )
+    if working_cache_stats is not None:
+        working_cache = working_cache_stats
+    elif pipeline is not None:
+        working_cache = pipeline.working_cache_stats
+    else:
+        working_cache = _EMPTY_CACHE
+
+    working_enabled = intent.enabled
+    requested_cs = intent.requested_color_space
+    resolved_cs: str | None = None
+    resolution_source = intent.resolution_source
+    converter_version = (
+        intent.converter_version if intent.enabled else WORKING_CONVERTER_VERSION
+    )
+    working_warns = list(intent.warnings)
+    working_source: str | None = None
+    conversion_applied: bool | None = None
+
+    if pipeline is not None:
+        try:
+            resolved_ws = pipeline.resolved_working_space
+            working_enabled = resolved_ws.enabled
+            requested_cs = resolved_ws.requested_color_space or requested_cs
+            resolved_cs = resolved_ws.working_color_space
+            resolution_source = resolved_ws.resolution_source
+            converter_version = resolved_ws.converter_version
+            for item in resolved_ws.warnings:
+                if item not in working_warns:
+                    working_warns.append(item)
+            for item in pipeline.working_warnings:
+                if item not in working_warns:
+                    working_warns.append(item)
+            working_source = pipeline.last_working_source_color_space
+            conversion_applied = (
+                pipeline.last_working_conversion_applied
+                if working_enabled
+                else False
+            )
+        except Exception:
+            pass
+
+    if transform_diagnostics is not None:
+        interpretation = str(transform_diagnostics.input_color_space)
+    elif pipeline is not None:
+        interpretation = pipeline.interpretation_color_space or input_cs
+    else:
+        interpretation = input_cs
 
     return ColorPipelineDiagnostics(
         active_backend=backend,
@@ -269,17 +321,17 @@ def build_color_pipeline_diagnostics(
         warnings=tuple(warnings),
         active_source_color_space=active_source,
         source_color_space_source=source_src,
-        interpretation_color_space=input_cs,
+        interpretation_color_space=interpretation,
         source_transform_warning=src_warn,
-        working_enabled=intent.enabled,
-        requested_working_color_space=intent.requested_color_space,
-        resolved_working_color_space=None,
-        working_resolution_source=intent.resolution_source,
-        working_converter_version=(
-            intent.converter_version if intent.enabled else WORKING_CONVERTER_VERSION
-        ),
+        working_enabled=working_enabled,
+        requested_working_color_space=requested_cs,
+        resolved_working_color_space=resolved_cs,
+        working_resolution_source=resolution_source,
+        working_converter_version=converter_version,
         working_cache=working_cache,
-        working_warnings=intent.warnings,
+        working_warnings=tuple(working_warns),
+        working_source_color_space=working_source,
+        working_conversion_applied=conversion_applied,
     )
 
 
@@ -317,6 +369,9 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"  Resolved: {diagnostics.resolved_working_color_space or '—'}",
         f"  Resolution source: {diagnostics.working_resolution_source or '—'}",
         f"  Converter version: {diagnostics.working_converter_version or '—'}",
+        f"  Working source: {diagnostics.working_source_color_space or '—'}",
+        f"  Conversion applied: "
+        f"{diagnostics.working_conversion_applied if diagnostics.working_conversion_applied is not None else '—'}",
         f"  "
         + _format_cache_line(
             "Working Cache",
