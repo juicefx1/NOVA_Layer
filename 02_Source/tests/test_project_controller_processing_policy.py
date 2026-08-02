@@ -220,20 +220,42 @@ def test_processing_methods_have_no_direct_reader_read_frame() -> None:
         for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "ProjectController"
     )
-    targets = {
+    sam_targets = {
         "_predict_hypothesis",
         "apply_frame_correction",
+    }
+    skeleton_targets = {
         "start_skeleton_retracking",
         "start_skeleton_fusion_detection",
     }
     for item in class_body.body:
         if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if item.name not in targets:
-            continue
         text = ast.get_source_segment(source, item) or ""
-        assert "_media_reader.read_frame" not in text, item.name
-        assert "_get_source_processing_frame" in text, item.name
+        if item.name in sam_targets:
+            assert "_media_reader.read_frame" not in text, item.name
+            assert "_get_sam_processing_frame" in text, item.name
+        if item.name in skeleton_targets:
+            assert "_media_reader.read_frame" not in text, item.name
+            assert "_get_source_processing_frame" in text, item.name
+            assert "_get_sam_processing_frame" not in text, item.name
+
+
+def test_propagation_stays_on_source_v1_helper() -> None:
+    """Propagation must not use SAM profile helper."""
+    text = inspect.getsource(ProjectController)
+    # Propagation path historically uses decode_frame_range / source helper — not SAM.
+    assert "_get_sam_processing_frame" in text
+    prop_src = inspect.getsource(ProjectController.start_skeleton_retracking)
+    assert "_get_sam_processing_frame" not in prop_src
+    fusion = inspect.getsource(ProjectController.start_skeleton_fusion_detection)
+    assert "_get_sam_processing_frame" not in fusion
+    # Range decode helper used by propagation should remain SOURCE without request.
+    from nova_layer.app import range_decode as rd
+
+    rd_src = inspect.getsource(rd)
+    assert "source_transform_request" not in rd_src
+
 
 
 def test_import_uses_image_sequence_reader_for_exr(

@@ -24,8 +24,13 @@ from nova_layer.app.frame_cache_stats import (
     bytes_from_env_mb,
 )
 from nova_layer.app.processing_frames import (
+    SOURCE_ENCODE_VERSION,
+    SOURCE_RASTER_OUTPUT_COLOR_SPACE,
     SOURCE_TRANSFORM_VERSION,
+    SOURCE_TRANSFORM_VERSION_V2,
     ProcessingColorPolicy,
+    SourceTransformRequest,
+    normalize_source_transform_request,
 )
 from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_CACHE_MAX_BYTES,
@@ -91,7 +96,30 @@ class TransformIdentity:
         )
 
 
-PreviewKey = tuple[Path, int, TransformIdentity]
+@dataclass(frozen=True, slots=True)
+class SourceV2TransformIdentity:
+    """SOURCE v2 cache identity (must never collide with v1 TransformIdentity)."""
+
+    working_identity: WorkingTransformIdentity
+    output_color_space: str
+    source_transform_version: str
+    encode_version: str
+
+    def __post_init__(self) -> None:
+        output = str(self.output_color_space or "").strip()
+        version = str(self.source_transform_version or "").strip()
+        encode = str(self.encode_version or "").strip()
+        if not output or not version or not encode:
+            raise ValueError(
+                "SourceV2TransformIdentity requires non-empty "
+                "output_color_space, source_transform_version, and encode_version"
+            )
+        object.__setattr__(self, "output_color_space", output)
+        object.__setattr__(self, "source_transform_version", version)
+        object.__setattr__(self, "encode_version", encode)
+
+
+PreviewKey = tuple[Path, int, TransformIdentity | SourceV2TransformIdentity]
 
 # Fixed Legacy linear→sRGB bake identity for SOURCE EXR cache keys.
 SOURCE_TRANSFORM_IDENTITY = TransformIdentity(
@@ -343,6 +371,13 @@ class PreviewPipeline:
         self._working_warnings: tuple[str, ...] = self._resolved_working.warnings
         self._last_working_conversion_applied = False
         self._last_working_source_color_space: str | None = None
+        self._active_source_transform_version = SOURCE_TRANSFORM_VERSION
+        self._source_output_color_space: str | None = None
+        self._source_working_color_space: str | None = None
+        self._source_ocio_config_identity: str | None = None
+        self._source_v2_fallback_reason: str | None = None
+        self._source_output_resolution_reason: str | None = None
+        self._last_source_v2_cache_hit: bool | None = None
         self._lock = Lock()
         self._scene_load_lock = Lock()
         self._raw_decodes = 0
@@ -421,6 +456,41 @@ class PreviewPipeline:
     def last_working_source_color_space(self) -> str | None:
         with self._lock:
             return self._last_working_source_color_space
+
+    @property
+    def active_source_transform_version(self) -> str:
+        with self._lock:
+            return self._active_source_transform_version
+
+    @property
+    def source_output_color_space(self) -> str | None:
+        with self._lock:
+            return self._source_output_color_space
+
+    @property
+    def source_working_color_space(self) -> str | None:
+        with self._lock:
+            return self._source_working_color_space
+
+    @property
+    def source_ocio_config_identity(self) -> str | None:
+        with self._lock:
+            return self._source_ocio_config_identity
+
+    @property
+    def source_v2_fallback_reason(self) -> str | None:
+        with self._lock:
+            return self._source_v2_fallback_reason
+
+    @property
+    def source_output_resolution_reason(self) -> str | None:
+        with self._lock:
+            return self._source_output_resolution_reason
+
+    @property
+    def last_source_v2_cache_hit(self) -> bool | None:
+        with self._lock:
+            return self._last_source_v2_cache_hit
 
     @property
     def working_conversions(self) -> int:
@@ -619,18 +689,43 @@ class PreviewPipeline:
         frame_number: int,
         *,
         policy: ProcessingColorPolicy,
+        source_transform_request: SourceTransformRequest | None = None,
     ) -> NDArray[np.uint8] | SceneFrame:
-        """Return pixels for a processing path according to ``policy``."""
+        """Return pixels for a processing path according to ``policy``.
+
+        ``source_transform_request`` is only valid with ``ProcessingColorPolicy.SOURCE``.
+        ``None`` / v1 → Legacy SOURCE bake. Explicit v2 → WorkingScene SOURCE encode.
+        """
+        if source_transform_request is not None and policy is not ProcessingColorPolicy.SOURCE:
+            raise ValueError(
+                "source_transform_request is only valid with "
+                "ProcessingColorPolicy.SOURCE "
+                f"(got policy={policy!r})"
+            )
         if policy is ProcessingColorPolicy.PREVIEW:
             return self.read_frame(path, frame_number)
         if policy is ProcessingColorPolicy.SCENE:
             return self.get_scene_frame(path, frame_number)
         if policy is ProcessingColorPolicy.SOURCE:
+            request = normalize_source_transform_request(source_transform_request)
+            if request.version == SOURCE_TRANSFORM_VERSION_V2:
+                return self._get_source_frame_v2(path, frame_number, request=request)
             return self._get_source_frame(path, frame_number)
         raise ValueError(f"Unsupported processing color policy: {policy!r}")
 
+    def _record_source_v1_unlocked(self) -> None:
+        self._active_source_transform_version = SOURCE_TRANSFORM_VERSION
+        self._source_output_color_space = None
+        self._source_working_color_space = None
+        self._source_ocio_config_identity = None
+        self._source_v2_fallback_reason = None
+        self._source_output_resolution_reason = None
+        self._last_source_v2_cache_hit = None
+
     def _get_source_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
         """Stable uint8 RGB independent of session viewer Exposure/Display/View."""
+        with self._lock:
+            self._record_source_v1_unlocked()
         resolved = _resolve_path(path)
         key: PreviewKey = (resolved, frame_number, SOURCE_TRANSFORM_IDENTITY)
         with self._lock:
@@ -673,6 +768,149 @@ class PreviewPipeline:
             )
         with self._lock:
             self._source_cache.put(key, source_u8, allow_eviction=True)
+        return source_u8.copy()
+
+    def _get_source_frame_v2(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        request: SourceTransformRequest,
+    ) -> NDArray[np.uint8]:
+        """Opt-in SOURCE v2: WorkingScene → encoded sRGB texture → uint8."""
+        resolved = _resolve_path(path)
+        with self._lock:
+            reader = self._reader
+            resolved_working = self._resolved_working
+            converter_cls = self._color_space_converter_cls
+
+        # Non-EXR / non-scene: raster uint8 pass-through (not WorkingScene semantics).
+        is_exr = _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
+            reader, resolved, frame_number
+        )
+        if not is_exr:
+            raster = reader.read_frame(resolved, frame_number)
+            source_u8 = np.ascontiguousarray(raster, dtype=np.uint8)
+            if source_u8.ndim != 3 or source_u8.shape[2] != 3:
+                raise MediaReadError(
+                    f"SOURCE frame must be HxWx3 RGB, got shape {source_u8.shape}"
+                )
+            with self._lock:
+                self._active_source_transform_version = SOURCE_TRANSFORM_VERSION_V2
+                self._source_output_color_space = SOURCE_RASTER_OUTPUT_COLOR_SPACE
+                self._source_working_color_space = None
+                self._source_ocio_config_identity = None
+                self._source_v2_fallback_reason = None
+                self._source_output_resolution_reason = "raster_passthrough"
+                self._last_source_v2_cache_hit = False
+                self._source_generations += 1
+            return source_u8.copy()
+
+        def _fallback_or_raise(reason: str) -> NDArray[np.uint8]:
+            if not request.allow_fallback_to_v1:
+                raise MediaReadError(reason)
+            with self._lock:
+                # Loud fallback: record reason; still return genuine v1.
+                pass
+            result = self._get_source_frame(resolved, frame_number)
+            with self._lock:
+                self._active_source_transform_version = SOURCE_TRANSFORM_VERSION
+                self._source_v2_fallback_reason = reason
+                self._source_output_color_space = None
+                self._source_working_color_space = None
+                self._source_ocio_config_identity = None
+                self._source_output_resolution_reason = None
+                self._last_source_v2_cache_hit = None
+            return result
+
+        if not resolved_working.enabled or not resolved_working.working_color_space:
+            return _fallback_or_raise(
+                "SOURCE v2 requires an enabled, resolved working color space "
+                "(working path disabled or unresolved)."
+            )
+        if not resolved_working.ocio_config_identity:
+            return _fallback_or_raise(
+                "SOURCE v2 requires an OCIO config identity on the working path."
+            )
+
+        try:
+            from nova_layer.adapters.color.source_frame_encoder import (
+                WorkingSourceEncoder,
+                resolve_source_output_color_space,
+            )
+
+            config_path = (
+                Path(resolved_working.config_path)
+                if resolved_working.config_path
+                else None
+            )
+            output_cs, resolve_reason = resolve_source_output_color_space(
+                config_path=config_path,
+                explicit=request.output_color_space,
+            )
+        except ColorTransformError as exc:
+            return _fallback_or_raise(f"SOURCE v2 output color-space resolve failed: {exc}")
+
+        try:
+            working = self._get_working_scene_frame(resolved, frame_number)
+        except (MediaReadError, ColorTransformError) as exc:
+            return _fallback_or_raise(f"SOURCE v2 working conversion failed: {exc}")
+
+        working_identity = WorkingTransformIdentity.try_create(
+            source_color_space=working.source_color_space,
+            working_color_space=working.working_color_space,
+            ocio_config_identity=working.ocio_config_identity,
+            converter_version=working.converter_version,
+        )
+        if working_identity is None:
+            return _fallback_or_raise(
+                "SOURCE v2 could not build WorkingTransformIdentity from WorkingSceneFrame."
+            )
+
+        v2_identity = SourceV2TransformIdentity(
+            working_identity=working_identity,
+            output_color_space=output_cs,
+            source_transform_version=SOURCE_TRANSFORM_VERSION_V2,
+            encode_version=SOURCE_ENCODE_VERSION,
+        )
+        key: PreviewKey = (resolved, frame_number, v2_identity)
+        with self._lock:
+            cached = self._source_cache.get(key)
+            if cached is not None:
+                self._active_source_transform_version = SOURCE_TRANSFORM_VERSION_V2
+                self._source_output_color_space = output_cs
+                self._source_working_color_space = working_identity.working_color_space
+                self._source_ocio_config_identity = working_identity.ocio_config_identity
+                self._source_v2_fallback_reason = None
+                self._source_output_resolution_reason = resolve_reason
+                self._last_source_v2_cache_hit = True
+                return cached
+
+        try:
+            encoder = WorkingSourceEncoder(
+                config_path=config_path,
+                working_color_space=working_identity.working_color_space,
+                output_color_space=output_cs,
+                color_space_converter_cls=converter_cls,
+            )
+            source_u8 = encoder.apply(working.pixels)
+        except ColorTransformError as exc:
+            return _fallback_or_raise(f"SOURCE v2 encode failed: {exc}")
+
+        if source_u8.ndim != 3 or source_u8.shape[2] != 3:
+            raise MediaReadError(
+                f"SOURCE v2 frame must be HxWx3 RGB, got shape {source_u8.shape}"
+            )
+        self._source_generations += 1
+        with self._lock:
+            self._source_cache.put(key, source_u8, allow_eviction=True)
+            self._active_source_transform_version = SOURCE_TRANSFORM_VERSION_V2
+            self._source_output_color_space = output_cs
+            self._source_working_color_space = working_identity.working_color_space
+            self._source_ocio_config_identity = working_identity.ocio_config_identity
+            self._source_v2_fallback_reason = None
+            self._source_output_resolution_reason = resolve_reason
+            self._last_source_v2_cache_hit = False
         return source_u8.copy()
 
     def _read_exr_pillow_source(self, resolved: Path, frame_number: int) -> NDArray[np.uint8]:

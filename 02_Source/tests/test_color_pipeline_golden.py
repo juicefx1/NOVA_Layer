@@ -485,6 +485,9 @@ def test_static_processing_paths_use_source() -> None:
         if item.name == "_decode_shot_frames":
             assert "ProcessingColorPolicy.SOURCE" in text
             continue
+        if item.name in {"_predict_hypothesis", "apply_frame_correction"}:
+            assert "_get_sam_processing_frame" in text, item.name
+            continue
         assert "_get_source_processing_frame" in text or (
             "ProcessingColorPolicy.SOURCE" in text
         ), item.name

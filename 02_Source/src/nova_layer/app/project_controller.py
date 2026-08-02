@@ -45,7 +45,18 @@ from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
 from nova_layer.app.preview_extraction import compose_rgba
-from nova_layer.app.processing_frames import ProcessingColorPolicy
+from nova_layer.app.processing_frames import (
+    SOURCE_TRANSFORM_VERSION,
+    SOURCE_TRANSFORM_VERSION_V2,
+    ProcessingColorPolicy,
+    ProcessingInputDiagnostics,
+    SamProcessingProfile,
+    SamSourceComparison,
+    SourceTransformRequest,
+    build_processing_input_diagnostics,
+    compare_uint8_rgb,
+    uint8_rgb_sha256,
+)
 from nova_layer.app.range_decode import RangeDecodeStats, decode_frame_range
 from nova_layer.app.render_color_metadata import (
     build_render_color_metadata,
@@ -305,6 +316,8 @@ class ProjectController(QObject):
         self.last_clip_decode_diagnostics: ClipDecodeDiagnostics | None = None
         self._last_resolved_color_settings: ResolvedColorSettings | None = None
         self._last_render_color_policy: str | None = None
+        self._sam_processing_profile = SamProcessingProfile()
+        self._last_sam_input_diagnostics: ProcessingInputDiagnostics | None = None
 
     @property
     def project(self) -> Project | None:
@@ -448,6 +461,25 @@ class ProjectController(QObject):
             frames.append(shot.master_frame)
         for frame_number in frames:
             self.request_frame(frame_number)
+
+    def set_sam_processing_profile(
+        self,
+        profile: SamProcessingProfile | None,
+    ) -> None:
+        """Runtime-only SAM SOURCE profile (default v1). Not saved to project.
+
+        Does not clear frame caches — v1/v2 SOURCE identities remain separate.
+        Safe with no active shot / project.
+        """
+        self._sam_processing_profile = profile or SamProcessingProfile()
+
+    @property
+    def sam_processing_profile(self) -> SamProcessingProfile:
+        return self._sam_processing_profile
+
+    @property
+    def last_sam_input_diagnostics(self) -> ProcessingInputDiagnostics | None:
+        return self._last_sam_input_diagnostics
 
     def create_project(self, name: str, parent_directory: Path) -> Project | None:
         clean_name = name.strip()
@@ -737,7 +769,7 @@ class ProjectController(QObject):
         path: Path,
         frame_number: int,
     ) -> NDArray[np.uint8]:
-        """Stable uint8 RGB for SAM / skeleton (SOURCE policy; no viewer look)."""
+        """Stable uint8 RGB for skeleton / propagation (SOURCE v1; no viewer look)."""
         frame = self._frame_decoder.get_processing_frame(
             path,
             frame_number,
@@ -750,10 +782,107 @@ class ProjectController(QObject):
             )
         return frame
 
+    def _get_sam_processing_frame(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8]:
+        """SAM hypothesis/correction input via runtime :class:`SamProcessingProfile`.
+
+        Default profile → SOURCE v1. Opt-in v2 uses ``source_transform_request``.
+        Updates :attr:`last_sam_input_diagnostics` (hash/summary only).
+        """
+        profile = self._sam_processing_profile
+        request = profile.to_source_transform_request()
+        frame = self._frame_decoder.get_processing_frame(
+            path,
+            frame_number,
+            policy=ProcessingColorPolicy.SOURCE,
+            source_transform_request=request,
+        )
+        if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8:
+            raise TypeError(
+                "SAM SOURCE processing frame must be an uint8 ndarray; "
+                f"got {type(frame).__name__} dtype={getattr(frame, 'dtype', None)}"
+            )
+
+        # Prefer pipeline-reported active version (reflects loud v1 fallback).
+        pipeline = getattr(self._frame_decoder, "pipeline", None)
+        active_version = profile.source_transform_version
+        output_cs = profile.output_color_space
+        if pipeline is not None:
+            try:
+                active_version = pipeline.active_source_transform_version
+                output_cs = pipeline.source_output_color_space
+            except Exception:
+                pass
+
+        self._last_sam_input_diagnostics = build_processing_input_diagnostics(
+            consumer="sam",
+            image=frame,
+            source_transform_version=active_version,
+            output_color_space=output_cs,
+        )
+        return frame
+
+    def compare_sam_source_versions(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> SamSourceComparison:
+        """Dev/test helper: fetch SOURCE v1 and v2 inputs and compare SHA/diffs.
+
+        Does not change the active :class:`SamProcessingProfile`. Requires working
+        path enabled for v2 (hard error unless resolved).
+        """
+        resolved = path.expanduser().resolve()
+        pipeline = self._frame_decoder.pipeline
+
+        v1_hits_before = pipeline.source_cache_stats.hits
+        v1 = self._frame_decoder.get_processing_frame(
+            resolved,
+            frame_number,
+            policy=ProcessingColorPolicy.SOURCE,
+            source_transform_request=SourceTransformRequest(
+                version=SOURCE_TRANSFORM_VERSION,
+            ),
+        )
+        v1_hits_after = pipeline.source_cache_stats.hits
+        if not isinstance(v1, np.ndarray):
+            raise TypeError("SOURCE v1 comparison expects uint8 ndarray")
+
+        v2_hits_before = pipeline.source_cache_stats.hits
+        v2 = self._frame_decoder.get_processing_frame(
+            resolved,
+            frame_number,
+            policy=ProcessingColorPolicy.SOURCE,
+            source_transform_request=SourceTransformRequest(
+                version=SOURCE_TRANSFORM_VERSION_V2,
+                output_color_space=self._sam_processing_profile.output_color_space,
+                allow_fallback_to_v1=False,
+            ),
+        )
+        v2_hits_after = pipeline.source_cache_stats.hits
+        if not isinstance(v2, np.ndarray):
+            raise TypeError("SOURCE v2 comparison expects uint8 ndarray")
+
+        identical, mean_abs, max_diff = compare_uint8_rgb(v1, v2)
+        return SamSourceComparison(
+            v1_sha256=uint8_rgb_sha256(v1),
+            v2_sha256=uint8_rgb_sha256(v2),
+            identical=identical,
+            mean_absolute_difference=mean_abs,
+            max_difference=max_diff,
+            v1_cache_hit=(v1_hits_after > v1_hits_before),
+            v2_cache_hit=(v2_hits_after > v2_hits_before),
+            v1_shape=tuple(int(x) for x in v1.shape),
+            v2_shape=tuple(int(x) for x in v2.shape),
+        )
+
     def _predict_hypothesis(self, shot: Shot, intent: ArtistIntent) -> SegmentationResult:
         if shot.media.source_path is None:
             raise ValueError("Source media is not linked.")
-        image = self._get_source_processing_frame(
+        image = self._get_sam_processing_frame(
             Path(shot.media.source_path), shot.master_frame
         )
         return self._segmentation.predict(
@@ -3089,7 +3218,7 @@ class ProjectController(QObject):
         try:
             if shot.media.source_path is None:
                 raise ValueError("Source media is not linked.")
-            image = self._get_source_processing_frame(
+            image = self._get_sam_processing_frame(
                 Path(shot.media.source_path), frame_number
             )
             result = self._segmentation.predict(

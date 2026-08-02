@@ -55,11 +55,13 @@ If the code constant changes, update this document and golden tests together.
 | Type | `uint8` RGB (`H×W×3`) |
 | Source | `get_processing_frame(..., policy=SOURCE)` / source cache |
 | Transforms | **Independent of Viewer Exposure / Display / View** |
-| EXR | Scene float → fixed Legacy linear→sRGB bake (`SOURCE_TRANSFORM_VERSION = source_legacy_srgb_v1`, exposure 0) |
-| Gamut caveat | Fixed bake assumes Rec.709-linear / sRGB-linear family; wide-gamut tags (ACEScg, Linear P3, Rec.2020, …) emit a diagnostic warning — **pixels are unchanged in Phase 10B** |
-| Non-EXR | Raster uint8 RGB (no viewer transform) |
+| EXR v1 (default) | Scene float → fixed Legacy linear→sRGB bake (`SOURCE_TRANSFORM_VERSION = source_legacy_srgb_v1`, exposure 0) |
+| EXR v2 (opt-in only) | WorkingSceneFrame → OCIO `ColorSpaceTransform(working → encoded sRGB texture)` → clip `[0,1]` → uint8 (`*255+0.5`). Version `SOURCE_TRANSFORM_VERSION_V2 = source_working_srgb_v2`. **No** Display/View/Exposure. Request via `SourceTransformRequest(version=…_V2)`. Silent v1 fallback is forbidden; `allow_fallback_to_v1=True` only yields genuine v1 + diagnostics reason. |
+| Gamut caveat (v1) | Fixed bake assumes Rec.709-linear / sRGB-linear family; wide-gamut tags emit a diagnostic warning — **pixels unchanged for v1** |
+| Non-EXR | Raster uint8 RGB (no viewer transform). A v2 request on raster is pass-through uint8 with diagnostics `output_color_space=source_raster_uint8` — **not** the same semantics as EXR v2. |
 | Intent | Reproducible capability / propagation / opt-in final render input |
-| Note | SOURCE is **not** scene-linear; it is a stable processing raster |
+| Note | SOURCE is **not** scene-linear; it is a stable processing raster. **Product consumers default to SOURCE v1** in Phase 10C-3. SAM may opt into v2 at runtime (`SamProcessingProfile`); skeleton / propagation remain v1. Compare inputs via `ProcessingInputDiagnostics` / `compare_sam_source_versions` before promoting defaults. |
+| Encode version (v2) | `SOURCE_ENCODE_VERSION = uint8_clip_v1` |
 
 ### SCENE
 
@@ -81,10 +83,10 @@ If the code constant changes, update this document and golden tests together.
 | Validation preview | PREVIEW | `get_preview_frame` |
 | Extraction preview | PREVIEW | `get_preview_frame` |
 | Background Removal preview | PREVIEW | Single-frame; no `color_policy` API |
-| SAM hypothesis | SOURCE | Via `_get_source_processing_frame` |
-| SAM correction | SOURCE | Same |
-| Skeleton retracking / fusion | SOURCE | Same |
-| Propagation (anchor + range) | SOURCE | `decode_frame_range(..., policy=SOURCE)` / `_decode_shot_frames` default |
+| SAM hypothesis | SOURCE v1 (default) | Runtime opt-in SOURCE v2 via `SamProcessingProfile` / `set_sam_processing_profile` (`_get_sam_processing_frame`) |
+| SAM correction | SOURCE v1 (default) | Same profile as hypothesis |
+| Skeleton retracking / fusion | SOURCE v1 | **Not** on SAM profile — `_get_source_processing_frame` only |
+| Propagation (anchor + range) | SOURCE v1 | Unchanged; still v1 |
 | Background Removal clip | PREVIEW | Opt-in SOURCE via `color_policy=` |
 | Smart Layer render | PREVIEW | Opt-in SOURCE via `color_policy=` |
 | Export (host / assets) | *(preserve render)* | PNG / uint8 EXR / MOV copy; no re-decode |
@@ -107,8 +109,9 @@ EXR (OIIO)
   → PreviewFrameCache      (PREVIEW uint8)
 
 RawFrameCache
-  → fixed SOURCE Legacy linear→sRGB (exposure 0)
-  → SourceFrameCache       (SOURCE uint8, key includes SOURCE_TRANSFORM_VERSION)
+  → fixed SOURCE Legacy linear→sRGB (exposure 0)  [v1]
+  → optional: WorkingSceneCache → ColorSpaceTransform → uint8  [v2 opt-in]
+  → SourceFrameCache  (v1 key: SOURCE_TRANSFORM_IDENTITY; v2 key: SourceV2TransformIdentity)
 ```
 
 | Event | Raw | Preview | Source |
@@ -118,6 +121,7 @@ RawFrameCache
 
 RawFrameCache key remains `(path, frame)` — ICS changes do **not** clear raw.
 SceneFrame tags are stored on the cached frame and survive copy-on-get.
+SOURCE v1 and v2 never share cache identity (v2 keys include working identity, output CS, and encode version).
 
 Non-EXR media skip the raw float path: PREVIEW/SOURCE both consume uint8 rasters
 from the reader (SOURCE without viewer bake; PREVIEW with session transform when

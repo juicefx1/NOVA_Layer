@@ -15,6 +15,7 @@ from nova_layer.adapters.color.display_transform import DisplayTransformDiagnost
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.preview_pipeline import PreviewPipeline, TransformIdentity
+from nova_layer.app.processing_frames import SOURCE_TRANSFORM_VERSION
 from nova_layer.app.scene_color_space import source_transform_warning as warning_for_source
 from nova_layer.app.working_space import (
     WORKING_CONVERTER_VERSION,
@@ -135,6 +136,16 @@ class ColorPipelineDiagnostics:
     working_warnings: tuple[str, ...] = ()
     working_source_color_space: str | None = None
     working_conversion_applied: bool | None = None
+
+    # Phase 10C-3A — SOURCE transform version / v2 diagnostics.
+    active_source_transform_version: str | None = None
+    source_output_color_space: str | None = None
+    source_working_color_space: str | None = None
+    source_ocio_config_identity: str | None = None
+    source_v2_fallback_reason: str | None = None
+    source_output_resolution_reason: str | None = None
+    source_v2_cache_hit: bool | None = None
+    consumer_processing_profile: str | None = None
 
 
 def empty_frame_cache_stats() -> FrameCacheStats:
@@ -282,6 +293,27 @@ def build_color_pipeline_diagnostics(
         except Exception:
             pass
 
+    active_source_version = SOURCE_TRANSFORM_VERSION
+    source_out_cs: str | None = None
+    source_working_cs: str | None = None
+    source_ocio_id: str | None = None
+    source_v2_fallback: str | None = None
+    source_resolve_reason: str | None = None
+    source_v2_hit: bool | None = None
+    if pipeline is not None:
+        try:
+            active_source_version = pipeline.active_source_transform_version
+            source_out_cs = pipeline.source_output_color_space
+            source_working_cs = pipeline.source_working_color_space
+            source_ocio_id = pipeline.source_ocio_config_identity
+            source_v2_fallback = pipeline.source_v2_fallback_reason
+            source_resolve_reason = pipeline.source_output_resolution_reason
+            source_v2_hit = pipeline.last_source_v2_cache_hit
+            if source_v2_fallback and source_v2_fallback not in warnings:
+                warnings.append(f"source_v2_fallback: {source_v2_fallback}")
+        except Exception:
+            pass
+
     if transform_diagnostics is not None:
         interpretation = str(transform_diagnostics.input_color_space)
     elif pipeline is not None:
@@ -332,6 +364,14 @@ def build_color_pipeline_diagnostics(
         working_warnings=tuple(working_warns),
         working_source_color_space=working_source,
         working_conversion_applied=conversion_applied,
+        active_source_transform_version=active_source_version,
+        source_output_color_space=source_out_cs,
+        source_working_color_space=source_working_cs,
+        source_ocio_config_identity=source_ocio_id,
+        source_v2_fallback_reason=source_v2_fallback,
+        source_output_resolution_reason=source_resolve_reason,
+        source_v2_cache_hit=source_v2_hit,
+        consumer_processing_profile=None,
     )
 
 
@@ -362,6 +402,22 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"{diagnostics.interpretation_color_space or '—'}",
         f"SOURCE transform warning: "
         f"{diagnostics.source_transform_warning or '—'}",
+        "",
+        "SOURCE Transform:",
+        f"  Active version: "
+        f"{diagnostics.active_source_transform_version or '—'}",
+        f"  Output color space: "
+        f"{diagnostics.source_output_color_space or '—'}",
+        f"  Working color space: "
+        f"{diagnostics.source_working_color_space or '—'}",
+        f"  OCIO config identity: "
+        f"{diagnostics.source_ocio_config_identity or '—'}",
+        f"  Output resolve reason: "
+        f"{diagnostics.source_output_resolution_reason or '—'}",
+        f"  v2 fallback reason: "
+        f"{diagnostics.source_v2_fallback_reason or '—'}",
+        f"  v2 cache hit: "
+        f"{diagnostics.source_v2_cache_hit if diagnostics.source_v2_cache_hit is not None else '—'}",
         "",
         "Working Space:",
         f"  Enabled: {diagnostics.working_enabled}",

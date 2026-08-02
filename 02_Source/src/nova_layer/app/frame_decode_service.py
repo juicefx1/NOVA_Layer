@@ -22,7 +22,10 @@ from nova_layer.app.preview_pipeline import (
     DEFAULT_PREVIEW_CACHE_SIZE,
     PreviewPipeline,
 )
-from nova_layer.app.processing_frames import ProcessingColorPolicy
+from nova_layer.app.processing_frames import (
+    ProcessingColorPolicy,
+    SourceTransformRequest,
+)
 from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_CACHE_MAX_BYTES,
     DEFAULT_RAW_FRAME_CACHE_SIZE,
@@ -281,13 +284,18 @@ class FrameDecodeService(QObject):
         frame_number: int,
         *,
         policy: ProcessingColorPolicy,
+        source_transform_request: SourceTransformRequest | None = None,
     ) -> NDArray[np.uint8] | SceneFrame:
-        """Processing pixels by policy (PREVIEW / SOURCE / SCENE)."""
+        """Processing pixels by policy (PREVIEW / SOURCE / SCENE).
+
+        ``source_transform_request`` is SOURCE-only (None → SOURCE v1).
+        """
         resolved = path.expanduser().resolve()
         return self._pipeline.get_processing_frame(
             resolved,
             frame_number,
             policy=policy,
+            source_transform_request=source_transform_request,
         )
 
     @property
