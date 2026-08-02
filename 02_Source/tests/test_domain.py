@@ -168,9 +168,13 @@ class DomainTests(TestCase):
 
             restored = store.load(package)
 
-            self.assertEqual(restored.schema_version, "1.0")
+            self.assertEqual(restored.schema_version, "1.1")
             self.assertEqual(len(restored.sequences[0].shots), 1)
-            self.assertEqual(store.last_migration_steps, ("0.9 → 1.0",))
+            self.assertEqual(
+                store.last_migration_steps,
+                ("0.9 → 1.0", "1.0 → 1.1"),
+            )
+            self.assertIsNone(restored.color_settings)
             source_after_load = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(source_after_load["schema_version"], "0.9")
 

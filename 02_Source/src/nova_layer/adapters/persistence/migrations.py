@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = "1.0"
+CURRENT_SCHEMA_VERSION = "1.1"
 Manifest = dict[str, Any]
 Migration = Callable[[Manifest], Manifest]
 
@@ -38,10 +38,23 @@ def migrate_0_9_to_1_0(manifest: Manifest) -> Manifest:
     return migrated
 
 
+def migrate_1_0_to_1_1(manifest: Manifest) -> Manifest:
+    """Additive Soft bump: optional Project.color_settings (default absent/None)."""
+    migrated = deepcopy(manifest)
+    migrated["schema_version"] = "1.1"
+    # Do not invent color_settings; missing key → Project.color_settings = None.
+    # Strip accidental non-object values from experimental files.
+    if "color_settings" in migrated and migrated["color_settings"] is not None:
+        if not isinstance(migrated["color_settings"], dict):
+            migrated["color_settings"] = None
+    return migrated
+
+
 class MigrationRegistry:
     def __init__(self) -> None:
         self._migrations: dict[str, tuple[str, Migration]] = {
             "0.9": ("1.0", migrate_0_9_to_1_0),
+            "1.0": ("1.1", migrate_1_0_to_1_1),
         }
 
     def migrate(self, manifest: Manifest) -> MigrationResult:

@@ -39,7 +39,12 @@ from nova_layer.domain.models import (
 )
 from nova_layer.domain.skeleton_presets import openpose_body_25_preset
 from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
-from nova_layer.ui.color_settings_dialog import ColorSettingsDialog, restore_color_settings
+from nova_layer.app.effective_color_settings import (
+    EffectiveColorApplication,
+    apply_effective_color_settings,
+)
+from nova_layer.adapters.color.settings import ResolvedColorSettings
+from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
 from nova_layer.ui.validation_dialog import ValidationDialog
@@ -58,6 +63,7 @@ class WorkspaceWindow(QMainWindow):
             raise ValueError("Workspace requires an active project")
         self.controller = controller
         self._workspace = workspace or WorkspaceManager.shared()
+        self._last_color_application: EffectiveColorApplication | None = None
         self.validation_dialog: ValidationDialog | None = None
         self._pending_frame = 0
         self._current_frame = 0
@@ -85,7 +91,7 @@ class WorkspaceWindow(QMainWindow):
         status.showMessage("Ready — import media to begin")
         self.setStatusBar(status)
 
-        self._restore_color_settings()
+        self._apply_effective_color_settings()
 
         controller.shot_changed.connect(self.set_shot)
         controller.frame_ready.connect(self.set_frame)
@@ -120,8 +126,28 @@ class WorkspaceWindow(QMainWindow):
         if controller.active_shot is not None:
             self.set_shot(controller.active_shot)
 
-    def _restore_color_settings(self) -> None:
-        restore_color_settings(self.controller, self._workspace)
+    def _apply_effective_color_settings(self) -> EffectiveColorApplication:
+        """Resolve project + workspace color settings and apply DisplayTransform."""
+        application = apply_effective_color_settings(
+            self.controller,
+            self._workspace,
+            project_root=self.controller.package_path,
+        )
+        self._last_color_application = application
+        return application
+
+    @property
+    def last_resolved_color_settings(self) -> ResolvedColorSettings | None:
+        if self._last_color_application is None:
+            return None
+        return self._last_color_application.resolved
+
+    @property
+    def color_resolve_warnings(self) -> tuple[str, ...]:
+        resolved = self.last_resolved_color_settings
+        if resolved is None:
+            return ()
+        return resolved.warnings
 
     def _build_menus(self) -> None:
         view_menu = self.menuBar().addMenu("&View")
@@ -134,6 +160,7 @@ class WorkspaceWindow(QMainWindow):
             self.controller,
             parent=self,
             workspace=self._workspace,
+            apply_effective=self._apply_effective_color_settings,
         )
         dialog.exec()
 
@@ -1326,11 +1353,13 @@ class WorkspaceWindow(QMainWindow):
 
     def _project_recovered(self, project: Project) -> None:
         self.setWindowTitle(f"{project.name} — NOVA Layer")
+        self._apply_effective_color_settings()
         if self.controller.active_shot is not None:
             self.set_shot(self.controller.active_shot)
         self.statusBar().showMessage("Autosave recovery restored")
 
     def _project_migrated(self, steps: list[str]) -> None:
+        self._apply_effective_color_settings()
         self.statusBar().showMessage(
             f"Project loaded through schema migration: {', '.join(steps)}. "
             "The original package remains unchanged until the next save."

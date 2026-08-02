@@ -12,7 +12,7 @@ Author : Supernova Studios
 
 # Authority Note
 
-This brief documents **Phase 1** executable capabilities (`schema_version "1.0"`, Smart Layer / Shot workflow).
+This brief documents **Phase 1** executable capabilities (`schema_version "1.1"`, Smart Layer / Shot workflow; optional `Project.color_settings`).
 
 The approved **object-workflow first vertical slice** (`schema_version "2.0"`, `NoSource` initial state, headless Mock Core Inference path) is specified in:
 

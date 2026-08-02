@@ -2865,6 +2865,10 @@ class ProjectController(QObject):
             return None
         return shot.smart_layers[0]
 
+    def save_current_project(self) -> bool:
+        """Persist the in-memory project to the open ``.nova`` package."""
+        return self._save_current()
+
     def _save_current(self) -> bool:
         if self._project is None or self._package_path is None:
             return False

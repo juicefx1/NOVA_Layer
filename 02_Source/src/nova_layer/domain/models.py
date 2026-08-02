@@ -294,13 +294,31 @@ class Sequence(DomainModel):
     shots: list[Shot] = Field(default_factory=list)
 
 
+class ProjectColorSettings(DomainModel):
+    """Optional Smart Layer project color / display-transform preferences.
+
+    Path resolution and OCIO availability are not validated here — runtime
+    ``resolve_color_settings`` owns that. Distinct from Object Workflow Schema 2.0.
+    """
+
+    backend: Literal["legacy", "ocio"] | None = None
+    config_kind: Literal["env", "package_relative", "absolute", "named"] | None = None
+    config_value: str | None = None
+    input_color_space: str | None = None
+    display: str | None = None
+    view: str | None = None
+    exposure: float | None = None
+    pin_display_view: bool = False
+
+
 class Project(DomainModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     id: UUID = Field(default_factory=uuid4)
     name: str
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     sequences: list[Sequence] = Field(default_factory=list)
+    color_settings: ProjectColorSettings | None = None
 
     def touch(self) -> None:
         self.updated_at = utc_now()
