@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -14,19 +14,30 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
+from nova_layer.app.frame_decode_service import FrameDecodeService
+from nova_layer.app.scene_range_decode import decode_scene_frame_range
 from nova_layer.domain.models import SmartLayerRender
+from nova_layer.export.scene_exr import (
+    SceneExrError,
+    build_scene_export_manifest_fields,
+    compose_scene_rgba,
+    write_scene_openexr_rgba,
+)
+from nova_layer.ports.media import MediaReadError
 
 
 class ExportFormat(StrEnum):
     PNG_SEQUENCE = "png_sequence"
     OPENEXR_SEQUENCE = "openexr_sequence"
     RGBA_MOV = "rgba_mov"
+    SCENE_OPENEXR_SEQUENCE = "scene_openexr_sequence"
 
 
 FORMAT_LABELS = {
     ExportFormat.PNG_SEQUENCE: "NOVA Layer RGBA PNG Sequence",
     ExportFormat.OPENEXR_SEQUENCE: "NOVA Layer RGBA OpenEXR Sequence",
     ExportFormat.RGBA_MOV: "NOVA Layer RGBA QuickTime",
+    ExportFormat.SCENE_OPENEXR_SEQUENCE: "NOVA Layer Scene-Linear OpenEXR Sequence",
 }
 
 
@@ -131,6 +142,11 @@ def export_smart_layer_assets(
     smart_layer: Mapping[str, Any],
     frame_rate: float,
     color_policy: Mapping[str, Any] | None = None,
+    scene_media_path: Path | None = None,
+    scene_decoder: FrameDecodeService | None = None,
+    mask_loader: Callable[[str], NDArray[np.uint8]] | None = None,
+    media_fingerprint: str | None = None,
+    input_color_space: str | None = None,
 ) -> SmartLayerExportResult:
     if not destination_directory.is_dir():
         raise SmartLayerExportError("Choose an existing export destination directory.")
@@ -189,14 +205,19 @@ def export_smart_layer_assets(
                     "pixel_format": "argb",
                 }
             )
+        elif format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
+            exported_files = _export_scene_openexr_sequence(
+                staging_path=staging_path,
+                package_path=package_path,
+                render=render,
+                scene_media_path=scene_media_path,
+                scene_decoder=scene_decoder,
+                mask_loader=mask_loader,
+                input_color_space=input_color_space,
+            )
         else:  # pragma: no cover - StrEnum exhaustiveness guard
             raise SmartLayerExportError(f"Unsupported export format: {format}")
 
-        resolved_policy = (
-            dict(color_policy)
-            if color_policy is not None
-            else _load_sidecar_color_policy(package_path, render)
-        )
         manifest: dict[str, Any] = {
             "format": FORMAT_LABELS[format],
             "format_id": format.value,
@@ -206,16 +227,38 @@ def export_smart_layer_assets(
             "render": render.model_dump(mode="json"),
             "files": exported_files,
         }
-        if resolved_policy:
-            manifest["color_policy"] = resolved_policy
-            # Convenience top-level fields used by host tooling / QA.
-            if "color_policy" in resolved_policy:
-                manifest["color_policy_id"] = resolved_policy.get("color_policy")
-            manifest["alpha_mode"] = resolved_policy.get("alpha_mode", "straight")
-            manifest["premultiplied"] = resolved_policy.get("premultiplied", False)
-            manifest["scene_linear"] = resolved_policy.get("scene_linear", False)
-            if resolved_policy.get("pixel_encoding") is not None:
-                manifest["pixel_encoding"] = resolved_policy.get("pixel_encoding")
+        if format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
+            scene_fields = build_scene_export_manifest_fields(
+                input_color_space=input_color_space,
+                media_fingerprint=media_fingerprint,
+                project_id=str(project.get("id")) if project.get("id") is not None else None,
+                shot_id=str(shot.get("id")) if shot.get("id") is not None else None,
+                layer_id=(
+                    str(smart_layer.get("id"))
+                    if smart_layer.get("id") is not None
+                    else None
+                ),
+                source_render_version=int(render.version),
+                frame_start=int(render.frame_start),
+                frame_end=int(render.frame_end),
+                pixel_type="half",
+            )
+            manifest.update(scene_fields)
+        else:
+            resolved_policy = (
+                dict(color_policy)
+                if color_policy is not None
+                else _load_sidecar_color_policy(package_path, render)
+            )
+            if resolved_policy:
+                manifest["color_policy"] = resolved_policy
+                if "color_policy" in resolved_policy:
+                    manifest["color_policy_id"] = resolved_policy.get("color_policy")
+                manifest["alpha_mode"] = resolved_policy.get("alpha_mode", "straight")
+                manifest["premultiplied"] = resolved_policy.get("premultiplied", False)
+                manifest["scene_linear"] = resolved_policy.get("scene_linear", False)
+                if resolved_policy.get("pixel_encoding") is not None:
+                    manifest["pixel_encoding"] = resolved_policy.get("pixel_encoding")
         (staging_path / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -229,6 +272,92 @@ def export_smart_layer_assets(
         format=format,
         file_count=len(exported_files),
     )
+
+
+def _export_scene_openexr_sequence(
+    *,
+    staging_path: Path,
+    package_path: Path,
+    render: SmartLayerRender,
+    scene_media_path: Path | None,
+    scene_decoder: FrameDecodeService | None,
+    mask_loader: Callable[[str], NDArray[np.uint8]] | None,
+    input_color_space: str | None,
+) -> list[dict[str, Any]]:
+    _ = package_path  # Scene pixels come from media+mask, not packaged render PNGs.
+    if scene_media_path is None or scene_decoder is None or mask_loader is None:
+        raise SmartLayerExportError(
+            "True Scene export requires an EXR image sequence and OpenImageIO "
+            "(scene media path, decoder, and mask loader)."
+        )
+    if not render.frames:
+        raise SmartLayerExportError("True Scene export requires render frames with masks.")
+
+    try:
+        scenes = decode_scene_frame_range(
+            scene_decoder,
+            scene_media_path,
+            render.frame_start,
+            render.frame_end,
+        )
+    except MediaReadError as exc:
+        raise SmartLayerExportError(
+            "True Scene export requires an EXR image sequence and OpenImageIO. "
+            f"({exc})"
+        ) from exc
+    except Exception as exc:
+        raise SmartLayerExportError(
+            "True Scene export requires an EXR image sequence and OpenImageIO. "
+            f"({exc})"
+        ) from exc
+
+    header_meta = {
+        "novaColorPolicy": "scene",
+        "novaSceneLinear": "true",
+        "novaAlphaMode": "straight",
+        "novaInputColorSpace": str(input_color_space or "scene_linear"),
+        "novaPixelEncoding": "scene_linear_half",
+    }
+    exported_files: list[dict[str, Any]] = []
+    for frame in render.frames:
+        scene = scenes.get(frame.frame_number)
+        if scene is None:
+            raise SmartLayerExportError(
+                f"True Scene export missing scene frame {frame.frame_number}."
+            )
+        if not frame.mask_reference:
+            raise SmartLayerExportError(
+                f"True Scene export missing mask for frame {frame.frame_number}."
+            )
+        try:
+            mask = mask_loader(frame.mask_reference)
+        except Exception as exc:
+            raise SmartLayerExportError(
+                f"True Scene export could not load mask for frame {frame.frame_number}: {exc}"
+            ) from exc
+        try:
+            rgba = compose_scene_rgba(scene.pixels, mask)
+        except ValueError as exc:
+            raise SmartLayerExportError(str(exc)) from exc
+        destination = staging_path / f"frame_{frame.frame_number:06d}.exr"
+        try:
+            write_scene_openexr_rgba(
+                destination,
+                rgba,
+                pixel_type="half",
+                compression="zip",
+                metadata=header_meta,
+            )
+        except SceneExrError as exc:
+            raise SmartLayerExportError(str(exc)) from exc
+        exported_files.append(
+            {
+                "name": destination.name,
+                "size": destination.stat().st_size,
+                "sha256": _sha256(destination),
+            }
+        )
+    return exported_files
 
 
 def _load_sidecar_color_policy(

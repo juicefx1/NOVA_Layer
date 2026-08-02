@@ -67,10 +67,12 @@ If the code constant changes, update this document and golden tests together.
 | Propagation (anchor + range) | SOURCE | `decode_frame_range(..., policy=SOURCE)` / `_decode_shot_frames` default |
 | Background Removal clip | PREVIEW | Opt-in SOURCE via `color_policy=` |
 | Smart Layer render | PREVIEW | Opt-in SOURCE via `color_policy=` |
-| Export (host / assets) | *(preserve render)* | No re-decode; sidecar → manifest |
+| Export (host / assets) | *(preserve render)* | PNG / uint8 EXR / MOV copy; no re-decode |
+| True Scene EXR export | — | Opt-in `scene_openexr_sequence`: export-time raw+mask; EXR+OIIO only |
 | Mask-only paths | N/A | Masks are alpha/matte; color policy does not apply |
 
-SCENE is not a render/export policy. Render APIs reject SCENE.
+`ProcessingColorPolicy.SCENE` is not a Smart Layer render policy. Render APIs reject SCENE.
+True Scene pixels are produced only by the dedicated export format.
 
 ---
 
@@ -122,18 +124,29 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
 
 ## E. Render / export contract
 
-1. **Render-time `color_policy` is the final pixel contract.**  
+1. **Render-time `color_policy` is the final pixel contract for uint8 Smart Layer renders.**  
    PREVIEW bakes the viewer look; SOURCE bakes the fixed source path.
-2. **Export does not re-decode media** and does not re-apply color policy.  
-   It copies or converts existing render PNG (PNG sequence / uint8-derived EXR / MOV).
-3. **Metadata sidecar:** `renders/vXXXX/color_policy.json` (project schema unchanged).
-4. **Export manifest** copies sidecar fields, including convenience top-level
-   `alpha_mode`, `premultiplied`, `scene_linear`, `pixel_encoding`.
-5. **Alpha:** `compose_rgba` uses straight alpha — RGB from frame, A from mask,
-   `premultiplied=false`, RGB preserved where A=0.
-6. **Current EXR export is not true scene-linear.** Manifest records
+2. **Default export formats (`png_sequence`, `openexr_sequence`, `rgba_mov`) do not
+   re-decode media** and do not re-apply color policy. They copy or convert existing
+   render PNG (uint8-derived EXR / MOV).
+3. **`openexr_sequence` is not true scene-linear.** Manifest records
    `scene_linear=false` and
    `pixel_encoding=display_or_source_uint8_scaled`.
+4. **`scene_openexr_sequence` (Phase 10A)** is a separate opt-in True Scene export:
+   - Export-time compose of `SceneFrame` (OIIO float RGB) + Smart Layer mask
+   - Straight alpha (`A = mask/255`, RGB preserved where A=0)
+   - half OpenEXR with **no** 0–1 remapping of scene RGB
+   - Requires EXR image sequence + OpenImageIO (no Pillow / non-EXR / video fallback)
+   - Does **not** change package render PNGs or render-time color policy
+   - Manifest: `scene_linear=true`, `export_mode=compose_scene`,
+     `pixel_encoding=scene_linear_half`, look fields null
+5. **Metadata sidecar:** `renders/vXXXX/color_policy.json` (project schema unchanged)
+   describes the uint8 render; True Scene export writes its own manifest fields and does
+   not overwrite that sidecar.
+6. **Alpha for uint8 compose:** `compose_rgba` — RGB from frame, A from mask,
+   `premultiplied=false`.
+7. **`ProcessingColorPolicy.SCENE` remains rejected for Smart Layer render.**
+   True Scene is export-only.
 
 ---
 

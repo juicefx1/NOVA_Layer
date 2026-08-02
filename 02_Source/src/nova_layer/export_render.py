@@ -4,7 +4,15 @@ import argparse
 import json
 from pathlib import Path
 
+from nova_layer.adapters.media.image_sequence_reader import (
+    ImageSequenceReader,
+    _load_openimageio,
+    list_sequence_files,
+)
+from nova_layer.adapters.media.media_reader_factory import MediaReaderFactory
 from nova_layer.adapters.persistence.json_store import JsonProjectStore
+from nova_layer.adapters.persistence.mask_store import PngMaskStore
+from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.export.smart_layer import (
     FORMAT_LABELS,
     ExportFormat,
@@ -60,6 +68,36 @@ def export_render_from_project(
     export_stem = (
         f"NOVA_{safe_layer_name or 'Smart_Layer'}_v{render.version:04d}_{format.value}"
     )
+    scene_kwargs: dict[str, object] = {}
+    if format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
+        if shot.media.source_path is None:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        media_path = Path(shot.media.source_path)
+        reader = MediaReaderFactory.create(media_path)
+        if not isinstance(reader, ImageSequenceReader):
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        files = list_sequence_files(media_path)
+        if not files or files[0].suffix.lower() != ".exr" or _load_openimageio() is None:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        decoder = FrameDecodeService(reader, prefetch_count=0)
+        mask_store = PngMaskStore()
+
+        def _mask_loader(reference: str) -> object:
+            return mask_store.load(package_path, reference)
+
+        scene_kwargs = {
+            "scene_media_path": media_path,
+            "scene_decoder": decoder,
+            "mask_loader": _mask_loader,
+            "media_fingerprint": shot.media.fingerprint,
+            "input_color_space": "scene_linear",
+        }
     result = export_smart_layer_assets(
         package_path=package_path,
         destination_directory=destination_directory,
@@ -78,6 +116,7 @@ def export_render_from_project(
         },
         smart_layer={"id": str(layer.id), "name": layer.name},
         frame_rate=shot.media.frame_rate,
+        **scene_kwargs,  # type: ignore[arg-type]
     )
     return result.path
 

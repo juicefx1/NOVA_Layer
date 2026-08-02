@@ -26,6 +26,11 @@ from nova_layer.adapters.color.display_transform import (
     DisplayTransformProtocol,
     LegacyDisplayTransform,
 )
+from nova_layer.adapters.media.image_sequence_reader import (
+    ImageSequenceReader,
+    _load_openimageio,
+    list_sequence_files,
+)
 from nova_layer.adapters.media.media_reader_factory import MediaReaderFactory
 from nova_layer.adapters.media.pyav_reader import PyAvMediaReader
 from nova_layer.adapters.persistence.json_store import JsonProjectStore, ProjectStoreError
@@ -2748,6 +2753,35 @@ class ProjectController(QObject):
         except ValueError:
             self.error_occurred.emit(f"Unsupported Smart Layer export format: {format}")
             return None
+        scene_kwargs: dict[str, object] = {}
+        if export_format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
+            try:
+                self._validate_true_scene_export_ready(shot)
+            except SmartLayerExportError as exc:
+                self.error_occurred.emit(str(exc))
+                return None
+            assert shot.media.source_path is not None
+            diagnostics = self.display_transform_diagnostics
+            input_cs = (
+                diagnostics.input_color_space
+                if diagnostics is not None
+                else "scene_linear"
+            )
+            if self._last_resolved_color_settings is not None:
+                input_cs = self._last_resolved_color_settings.input_color_space
+            package = self._package_path
+
+            def _mask_loader(reference: str) -> NDArray[np.uint8]:
+                assert package is not None
+                return self._mask_store.load(package, reference)
+
+            scene_kwargs = {
+                "scene_media_path": Path(shot.media.source_path),
+                "scene_decoder": self._frame_decoder,
+                "mask_loader": _mask_loader,
+                "media_fingerprint": shot.media.fingerprint,
+                "input_color_space": input_cs,
+            }
         safe_layer_name = re.sub(r"[^A-Za-z0-9_-]+", "_", layer.name).strip("_")
         export_stem = (
             f"NOVA_{safe_layer_name or 'Smart_Layer'}_v{render.version:04d}_{export_format.value}"
@@ -2772,12 +2806,47 @@ class ProjectController(QObject):
                 smart_layer={"id": str(layer.id), "name": layer.name},
                 frame_rate=shot.media.frame_rate,
                 color_policy=load_render_color_metadata(self._package_path, render),
+                **scene_kwargs,  # type: ignore[arg-type]
             )
-        except (OSError, ValueError, SmartLayerExportError, FileNotFoundError) as exc:
+        except (OSError, ValueError, SmartLayerExportError, FileNotFoundError, MediaReadError) as exc:
             self.error_occurred.emit(f"Smart Layer export failed: {exc}")
             return None
         self.smart_layer_export_ready.emit(str(result.path))
         return result.path
+
+    def _validate_true_scene_export_ready(self, shot: Shot) -> None:
+        """Raise SmartLayerExportError unless EXR sequence + OIIO scene path is available."""
+        if shot.media.source_path is None:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        media_path = Path(shot.media.source_path)
+        if not isinstance(self._media_reader, ImageSequenceReader):
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        try:
+            files = list_sequence_files(media_path)
+        except Exception as exc:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            ) from exc
+        if not files or files[0].suffix.lower() != ".exr":
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        if _load_openimageio() is None:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO."
+            )
+        # Probe one scene frame to reject Pillow-only environments early.
+        try:
+            self._frame_decoder.get_scene_frame(media_path, 0)
+        except MediaReadError as exc:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO. "
+                f"({exc})"
+            ) from exc
 
     def _job_failed(self, name: str, message: str) -> None:
         if name == "skeleton_fusion_detection":
