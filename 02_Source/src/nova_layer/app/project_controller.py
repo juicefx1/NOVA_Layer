@@ -35,6 +35,7 @@ from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
 from nova_layer.app.preview_extraction import compose_rgba
+from nova_layer.app.processing_frames import ProcessingColorPolicy
 from nova_layer.app.range_decode import RangeDecodeStats, decode_frame_range
 from nova_layer.app.skeleton_fusion import create_fusion_candidate
 from nova_layer.app.video_extraction_service import (
@@ -619,11 +620,30 @@ class ProjectController(QObject):
             return False
         return True
 
+    def _get_source_processing_frame(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8]:
+        """Stable uint8 RGB for SAM / skeleton (SOURCE policy; no viewer look)."""
+        frame = self._frame_decoder.get_processing_frame(
+            path,
+            frame_number,
+            policy=ProcessingColorPolicy.SOURCE,
+        )
+        if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8:
+            raise TypeError(
+                "SOURCE processing frame must be an uint8 ndarray; "
+                f"got {type(frame).__name__} dtype={getattr(frame, 'dtype', None)}"
+            )
+        return frame
+
     def _predict_hypothesis(self, shot: Shot, intent: ArtistIntent) -> SegmentationResult:
         if shot.media.source_path is None:
             raise ValueError("Source media is not linked.")
-        # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
-        image = self._media_reader.read_frame(Path(shot.media.source_path), shot.master_frame)
+        image = self._get_source_processing_frame(
+            Path(shot.media.source_path), shot.master_frame
+        )
         return self._segmentation.predict(
             frame_number=shot.master_frame,
             image=image,
@@ -857,11 +877,10 @@ class ProjectController(QObject):
                 if cancel_event.is_set():
                     return None
                 report(index - 1, total, f"Decoding pose frame {frame_number}")
-                # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
                 frames.append(
                     VideoFrame(
                         frame_number=frame_number,
-                        image=self._media_reader.read_frame(media_path, frame_number),
+                        image=self._get_source_processing_frame(media_path, frame_number),
                     )
                 )
             report(len(frame_numbers), total, "Retracking from artist pose anchors")
@@ -909,8 +928,7 @@ class ProjectController(QObject):
 
         def operation(cancel_event: Event, report: ProgressCallback) -> object:
             report(0, 2, f"Decoding fusion frame {frame_number}")
-            # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
-            image = self._media_reader.read_frame(media_path, frame_number)
+            image = self._get_source_processing_frame(media_path, frame_number)
             if cancel_event.is_set():
                 return None
             report(1, 2, "Detecting automatic depth pose")
@@ -2818,8 +2836,9 @@ class ProjectController(QObject):
         try:
             if shot.media.source_path is None:
                 raise ValueError("Source media is not linked.")
-            # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
-            image = self._media_reader.read_frame(Path(shot.media.source_path), frame_number)
+            image = self._get_source_processing_frame(
+                Path(shot.media.source_path), frame_number
+            )
             result = self._segmentation.predict(
                 frame_number=frame_number,
                 image=image,

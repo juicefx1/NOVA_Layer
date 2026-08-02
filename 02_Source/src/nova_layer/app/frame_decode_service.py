@@ -17,6 +17,7 @@ from nova_layer.app.preview_pipeline import (
     DEFAULT_PREVIEW_CACHE_SIZE,
     PreviewPipeline,
 )
+from nova_layer.app.processing_frames import ProcessingColorPolicy
 from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_CACHE_MAX_BYTES,
     DEFAULT_RAW_FRAME_CACHE_SIZE,
@@ -251,6 +252,25 @@ class FrameDecodeService(QObject):
         """Scene-linear EXR pixels via raw cache (no display transform / exposure)."""
         resolved = path.expanduser().resolve()
         return self._pipeline.get_scene_frame(resolved, frame_number)
+
+    def get_processing_frame(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        policy: ProcessingColorPolicy,
+    ) -> NDArray[np.uint8] | SceneFrame:
+        """Processing pixels by policy (PREVIEW / SOURCE / SCENE)."""
+        resolved = path.expanduser().resolve()
+        return self._pipeline.get_processing_frame(
+            resolved,
+            frame_number,
+            policy=policy,
+        )
+
+    @property
+    def source_cache_stats(self) -> FrameCacheStats:
+        return self._pipeline.source_cache_stats
 
     def clear(self) -> None:
         with self._lock:

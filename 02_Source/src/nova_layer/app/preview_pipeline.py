@@ -19,6 +19,10 @@ from nova_layer.app.frame_cache_stats import (
     PreviewPipelineStats,
     bytes_from_env_mb,
 )
+from nova_layer.app.processing_frames import (
+    SOURCE_TRANSFORM_VERSION,
+    ProcessingColorPolicy,
+)
 from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_CACHE_MAX_BYTES,
     DEFAULT_RAW_FRAME_CACHE_SIZE,
@@ -75,6 +79,17 @@ class TransformIdentity:
 
 
 PreviewKey = tuple[Path, int, TransformIdentity]
+
+# Fixed Legacy linear→sRGB bake identity for SOURCE EXR cache keys.
+SOURCE_TRANSFORM_IDENTITY = TransformIdentity(
+    backend=SOURCE_TRANSFORM_VERSION,
+    config_path=None,
+    config_source=None,
+    input_color_space="scene_linear",
+    display=None,
+    view=None,
+    exposure=0.0,
+)
 
 
 class PreviewFrameCache:
@@ -294,10 +309,17 @@ class PreviewPipeline:
             max_entries=preview_cache_size,
             max_bytes=preview_bytes,
         )
+        # Separate LRU so SOURCE bytes are not evicted by scrubbing previews.
+        self._source_cache = PreviewFrameCache(
+            max_entries=preview_cache_size,
+            max_bytes=preview_bytes,
+        )
+        self._source_display = LegacyDisplayTransform()
         self._lock = Lock()
         self._scene_load_lock = Lock()
         self._raw_decodes = 0
         self._preview_generations = 0
+        self._source_generations = 0
         self._raw_prefetch_skips = 0
         self._preview_prefetch_skips = 0
 
@@ -335,6 +357,10 @@ class PreviewPipeline:
         return self._preview_cache.stats()
 
     @property
+    def source_cache_stats(self) -> FrameCacheStats:
+        return self._source_cache.stats()
+
+    @property
     def pipeline_stats(self) -> PreviewPipelineStats:
         return PreviewPipelineStats(
             raw_decodes=self._raw_decodes,
@@ -347,14 +373,16 @@ class PreviewPipeline:
         with self._lock:
             self._reader = reader
             self._preview_cache.clear()
+            self._source_cache.clear()
             if not keep_raw_cache:
                 self._raw_cache.clear()
 
     def set_display_transform(self, transform: DisplayTransformProtocol | None) -> None:
-        """Swap exposure/display path; keep EXR raw bytes, drop preview cache.
+        """Swap exposure/display path; keep EXR raw + SOURCE caches, drop preview.
 
-        Lifetime counters (hits/misses/…) on both caches are retained; preview
-        ``count`` / ``current_bytes`` go to 0 via ``clear()``.
+        Lifetime counters (hits/misses/…) on caches are retained; preview
+        ``count`` / ``current_bytes`` go to 0 via ``clear()``. SOURCE stable
+        uint8 bake is independent of session viewer transform.
         """
         with self._lock:
             self._display_transform = transform or LegacyDisplayTransform()
@@ -368,6 +396,7 @@ class PreviewPipeline:
     def clear_all(self) -> None:
         with self._lock:
             self._preview_cache.clear()
+            self._source_cache.clear()
             self._raw_cache.clear()
 
     def read_frame(
@@ -431,6 +460,86 @@ class PreviewPipeline:
                 f"Could not load scene frame {frame_number} from {resolved}."
             )
         return scene
+
+    def get_processing_frame(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        policy: ProcessingColorPolicy,
+    ) -> NDArray[np.uint8] | SceneFrame:
+        """Return pixels for a processing path according to ``policy``."""
+        if policy is ProcessingColorPolicy.PREVIEW:
+            return self.read_frame(path, frame_number)
+        if policy is ProcessingColorPolicy.SCENE:
+            return self.get_scene_frame(path, frame_number)
+        if policy is ProcessingColorPolicy.SOURCE:
+            return self._get_source_frame(path, frame_number)
+        raise ValueError(f"Unsupported processing color policy: {policy!r}")
+
+    def _get_source_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
+        """Stable uint8 RGB independent of session viewer Exposure/Display/View."""
+        resolved = _resolve_path(path)
+        key: PreviewKey = (resolved, frame_number, SOURCE_TRANSFORM_IDENTITY)
+        with self._lock:
+            cached = self._source_cache.get(key)
+            if cached is not None:
+                return cached
+            reader = self._reader
+            source_display = self._source_display
+
+        if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
+            reader, resolved, frame_number
+        ):
+            try:
+                scene = self._get_or_load_scene(reader, resolved, frame_number)
+            except MediaReadError:
+                scene = None
+            if scene is not None:
+                try:
+                    baked = source_display.apply(scene.pixels)
+                except (TypeError, ValueError) as exc:
+                    raise MediaReadError(
+                        f"Could not bake SOURCE frame {frame_number}: {exc}"
+                    ) from exc
+                self._source_generations += 1
+                source_u8 = np.ascontiguousarray(baked, dtype=np.uint8)
+            else:
+                # EXR without usable OIIO scene decode — Pillow path (no viewer TF).
+                source_u8 = self._read_exr_pillow_source(resolved, frame_number)
+                self._source_generations += 1
+        else:
+            # PNG / video / stubs: raster uint8 without applying viewer transform.
+            # ImageSequenceReader non-EXR and PyAv never apply display_transform.
+            raster = reader.read_frame(resolved, frame_number)
+            self._source_generations += 1
+            source_u8 = np.ascontiguousarray(raster, dtype=np.uint8)
+
+        if source_u8.ndim != 3 or source_u8.shape[2] != 3:
+            raise MediaReadError(
+                f"SOURCE frame must be HxWx3 RGB, got shape {source_u8.shape}"
+            )
+        with self._lock:
+            self._source_cache.put(key, source_u8, allow_eviction=True)
+        return source_u8.copy()
+
+    def _read_exr_pillow_source(self, resolved: Path, frame_number: int) -> NDArray[np.uint8]:
+        from nova_layer.adapters.media.image_sequence_reader import (
+            _read_exr_pillow,
+            list_sequence_files,
+        )
+
+        if resolved.is_file() and resolved.suffix.lower() == ".exr":
+            return np.ascontiguousarray(_read_exr_pillow(resolved), dtype=np.uint8)
+        files = list_sequence_files(resolved)
+        if frame_number < 0 or frame_number >= len(files):
+            raise MediaReadError(f"Frame {frame_number} is outside the sequence.")
+        file_path = files[frame_number]
+        if file_path.suffix.lower() != ".exr":
+            raise MediaReadError(
+                f"SOURCE Pillow EXR fallback requires .exr, got {file_path.suffix!r}"
+            )
+        return np.ascontiguousarray(_read_exr_pillow(file_path), dtype=np.uint8)
 
     def put_preview(
         self,
