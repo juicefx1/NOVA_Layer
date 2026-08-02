@@ -38,7 +38,13 @@ def decode_frame_range(
     should_cancel: CancelChecker | None = None,
     report_progress: ProgressCallback | None = None,
 ) -> tuple[dict[int, NDArray[np.uint8]], RangeDecodeStats]:
-    """Decode [start, end] ascending, reusing cache and a single reader session when possible."""
+    """Decode [start, end] ascending, reusing cache and a single reader session when possible.
+
+    PyAv contiguous misses use ``read_frames`` batch + preview ``put_cached``.
+    Other readers (image sequences, stubs) use ``get_preview_frame`` so EXR
+    hits share the PreviewPipeline raw + preview caches (no double put /
+    double transform).
+    """
     if end < start:
         raise MediaReadError(f"Invalid decode range {start}–{end}.")
     resolved = path.expanduser().resolve()
@@ -69,6 +75,7 @@ def decode_frame_range(
                 image = batch[frame_number]
                 frames[frame_number] = image
                 decoded_frames += 1
+                # Video path bypasses PreviewPipeline; warm preview once.
                 decoder.put_cached(resolved, frame_number, image, expand_to_fit=True)
                 if report_progress is not None:
                     report_progress(
@@ -77,15 +84,19 @@ def decode_frame_range(
                         f"Decoded frame {frame_number}",
                     )
         else:
-            # Ascending fallback for non-PyAv readers (tests / stubs).
+            # Image sequences / stubs: pipeline owns decode + preview put.
             for frame_number in missing:
                 if should_cancel is not None and should_cancel():
                     break
                 decoder_opens += 1
-                image = reader.read_frame(resolved, frame_number)
+                image = decoder.get_preview_frame(
+                    resolved,
+                    frame_number,
+                    expand_to_fit=True,
+                    schedule_prefetch=False,
+                )
                 frames[frame_number] = image
                 decoded_frames += 1
-                decoder.put_cached(resolved, frame_number, image, expand_to_fit=True)
                 if report_progress is not None:
                     report_progress(
                         len(frames),

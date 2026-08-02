@@ -24,7 +24,7 @@ from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_FRAME_CACHE_SIZE,
     RawFrameCache,
 )
-from nova_layer.ports.media import MediaReader
+from nova_layer.ports.media import MediaReadError, MediaReader
 from nova_layer.ports.scene_frames import SceneFrame
 
 # Entry-count soft cap (legacy ``preview_cache_size`` / ``cache_size``).
@@ -370,7 +370,13 @@ class PreviewPipeline:
             self._preview_cache.clear()
             self._raw_cache.clear()
 
-    def read_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
+    def read_frame(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        expand_to_fit: bool = False,
+    ) -> NDArray[np.uint8]:
         resolved = _resolve_path(path)
         with self._lock:
             tid = self._transform_id
@@ -397,8 +403,34 @@ class PreviewPipeline:
         preview_u8 = np.ascontiguousarray(preview, dtype=np.uint8)
         with self._lock:
             if self._transform_id == tid:
-                self._preview_cache.put(key, preview_u8, allow_eviction=True)
+                self._preview_cache.put(
+                    key,
+                    preview_u8,
+                    expand_to_fit=expand_to_fit,
+                    allow_eviction=True,
+                )
         return preview_u8.copy()
+
+    def get_scene_frame(self, path: Path, frame_number: int) -> SceneFrame:
+        """Return scene-linear EXR pixels via the raw cache (no display transform)."""
+        resolved = _resolve_path(path)
+        with self._lock:
+            reader = self._reader
+        if not _is_scene_frame_source(reader):
+            raise MediaReadError(
+                "Scene frames require a SceneFrameSource media reader (EXR via OIIO)."
+            )
+        if not self._frame_is_exr_candidate(reader, resolved, frame_number):
+            raise MediaReadError(
+                f"Scene frames are only supported for EXR media; "
+                f"frame {frame_number} is not an EXR candidate."
+            )
+        scene = self._get_or_load_scene(reader, resolved, frame_number)
+        if scene is None:
+            raise MediaReadError(
+                f"Could not load scene frame {frame_number} from {resolved}."
+            )
+        return scene
 
     def put_preview(
         self,

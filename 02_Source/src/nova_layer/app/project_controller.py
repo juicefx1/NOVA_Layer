@@ -259,6 +259,7 @@ class ProjectController(QObject):
         self._store = store or JsonProjectStore()
         self._display_transform = display_transform
         self._preview_frame_number: int | None = None
+        self._media_reader_injected = media_reader is not None
         self._media_reader = media_reader or PyAvMediaReader()
         self._frame_decoder = FrameDecodeService(
             self._media_reader,
@@ -365,10 +366,15 @@ class ProjectController(QObject):
         return None
 
     def _set_media_reader(self, path: Path) -> None:
-        self._media_reader = MediaReaderFactory.create(
-            path,
-            display_transform=self._display_transform,
-        )
+        if not self._media_reader_injected:
+            self._media_reader = MediaReaderFactory.create(
+                path,
+                display_transform=self._display_transform,
+            )
+        elif self._display_transform is not None and hasattr(
+            self._media_reader, "display_transform"
+        ):
+            self._media_reader.display_transform = self._display_transform  # type: ignore[attr-defined]
         self._frame_decoder = FrameDecodeService(
             self._media_reader,
             display_transform=self._display_transform,
@@ -616,6 +622,7 @@ class ProjectController(QObject):
     def _predict_hypothesis(self, shot: Shot, intent: ArtistIntent) -> SegmentationResult:
         if shot.media.source_path is None:
             raise ValueError("Source media is not linked.")
+        # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
         image = self._media_reader.read_frame(Path(shot.media.source_path), shot.master_frame)
         return self._segmentation.predict(
             frame_number=shot.master_frame,
@@ -850,6 +857,7 @@ class ProjectController(QObject):
                 if cancel_event.is_set():
                     return None
                 report(index - 1, total, f"Decoding pose frame {frame_number}")
+                # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
                 frames.append(
                     VideoFrame(
                         frame_number=frame_number,
@@ -901,6 +909,7 @@ class ProjectController(QObject):
 
         def operation(cancel_event: Event, report: ProgressCallback) -> object:
             report(0, 2, f"Decoding fusion frame {frame_number}")
+            # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
             image = self._media_reader.read_frame(media_path, frame_number)
             if cancel_event.is_set():
                 return None
@@ -1638,7 +1647,7 @@ class ProjectController(QObject):
                 service = self._background_removal()
             except VideoExtractionError as exc:
                 raise RuntimeError(f"{exc.code}: {exc.message}") from exc
-            frame = self._frame_decoder.read_frame(media_path, target_frame)
+            frame = self._frame_decoder.get_preview_frame(media_path, target_frame)
             mask = self._mask_store.load(package_path, mask_reference)
             output = service.extract_frame(
                 FrameExtractionInput(
@@ -2632,7 +2641,7 @@ class ProjectController(QObject):
         )
         for result in ordered_results:
             try:
-                frame = self._media_reader.read_frame(
+                frame = self._frame_decoder.get_preview_frame(
                     Path(shot.media.source_path), result.frame_number
                 )
                 mask = self._mask_store.load(self._package_path, result.mask_reference)
@@ -2759,7 +2768,7 @@ class ProjectController(QObject):
         generated: list[tuple[int, NDArray[np.uint8], str]] = []
         try:
             for result in sorted(layer.frame_results, key=lambda item: item.frame_number):
-                frame = self._media_reader.read_frame(
+                frame = self._frame_decoder.get_preview_frame(
                     Path(shot.media.source_path), result.frame_number
                 )
                 mask = self._mask_store.load(self._package_path, result.mask_reference)
@@ -2809,6 +2818,7 @@ class ProjectController(QObject):
         try:
             if shot.media.source_path is None:
                 raise ValueError("Source media is not linked.")
+            # Phase 8C-1: intentional direct reader — processing pixel contract unchanged.
             image = self._media_reader.read_frame(Path(shot.media.source_path), frame_number)
             result = self._segmentation.predict(
                 frame_number=frame_number,

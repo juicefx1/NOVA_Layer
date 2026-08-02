@@ -22,6 +22,7 @@ from nova_layer.app.raw_frame_cache import (
     DEFAULT_RAW_FRAME_CACHE_SIZE,
 )
 from nova_layer.ports.media import MediaReader
+from nova_layer.ports.scene_frames import SceneFrame
 
 _DEFAULT_PREFETCH_COUNT = 4
 
@@ -217,14 +218,39 @@ class FrameDecodeService(QObject):
             allow_eviction=True,
         )
 
-    def read_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
-        """Synchronous decode with preview (+ EXR raw) cache reuse."""
+    def get_preview_frame(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        expand_to_fit: bool = False,
+        schedule_prefetch: bool = True,
+    ) -> NDArray[np.uint8]:
+        """Synchronous uint8 display preview via PreviewPipeline (raw + preview caches).
+
+        ``schedule_prefetch`` should be False for bulk range decode so worker
+        prefetch does not race or multiply reader calls.
+        """
         resolved = path.expanduser().resolve()
         with self._lock:
             self._prefetch_generation += 1
-        decoded = self._pipeline.read_frame(resolved, frame_number)
-        self._schedule_prefetch(resolved, frame_number)
+        decoded = self._pipeline.read_frame(
+            resolved,
+            frame_number,
+            expand_to_fit=expand_to_fit,
+        )
+        if schedule_prefetch:
+            self._schedule_prefetch(resolved, frame_number)
         return decoded
+
+    def read_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
+        """Backward-compatible alias for :meth:`get_preview_frame`."""
+        return self.get_preview_frame(path, frame_number)
+
+    def get_scene_frame(self, path: Path, frame_number: int) -> SceneFrame:
+        """Scene-linear EXR pixels via raw cache (no display transform / exposure)."""
+        resolved = path.expanduser().resolve()
+        return self._pipeline.get_scene_frame(resolved, frame_number)
 
     def clear(self) -> None:
         with self._lock:
