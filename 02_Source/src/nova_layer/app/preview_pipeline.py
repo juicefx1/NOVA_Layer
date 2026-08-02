@@ -14,12 +14,28 @@ from nova_layer.adapters.color.display_transform import (
     DisplayTransformProtocol,
     LegacyDisplayTransform,
 )
-from nova_layer.app.raw_frame_cache import DEFAULT_RAW_FRAME_CACHE_SIZE, RawFrameCache
+from nova_layer.app.frame_cache_stats import (
+    FrameCacheStats,
+    PreviewPipelineStats,
+    bytes_from_env_mb,
+)
+from nova_layer.app.raw_frame_cache import (
+    DEFAULT_RAW_CACHE_MAX_BYTES,
+    DEFAULT_RAW_FRAME_CACHE_SIZE,
+    RawFrameCache,
+)
 from nova_layer.ports.media import MediaReader
 from nova_layer.ports.scene_frames import SceneFrame
 
-# Preview cache holds uint8 RGB. 32×1080p ≈ 190 MB; prefer smaller raw cache instead.
+# Entry-count soft cap (legacy ``preview_cache_size`` / ``cache_size``).
 DEFAULT_PREVIEW_CACHE_SIZE = 32
+
+# ~256 MiB hard RAM budget for uint8 RGB previews (override: NOVA_PREVIEW_CACHE_MB).
+DEFAULT_PREVIEW_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _default_preview_max_bytes() -> int:
+    return bytes_from_env_mb("NOVA_PREVIEW_CACHE_MB", DEFAULT_PREVIEW_CACHE_MAX_BYTES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,33 +78,97 @@ PreviewKey = tuple[Path, int, TransformIdentity]
 
 
 class PreviewFrameCache:
-    """Thread-unsafe LRU for uint8 preview frames keyed by path/frame/transform."""
+    """Thread-safe LRU for uint8 preview frames with byte budget + entry cap.
 
-    def __init__(self, capacity: int) -> None:
-        if capacity < 1:
-            raise ValueError("preview_cache_size must be positive")
-        self._capacity = capacity
+    ``expand_to_fit`` may raise ``max_entries`` but never raises ``max_bytes``.
+    """
+
+    def __init__(
+        self,
+        capacity: int | None = None,
+        *,
+        max_bytes: int | None = None,
+        max_entries: int | None = None,
+    ) -> None:
+        if capacity is not None and max_entries is None:
+            max_entries = capacity
+        if max_entries is None:
+            max_entries = DEFAULT_PREVIEW_CACHE_SIZE
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        if max_bytes is None:
+            max_bytes = _default_preview_max_bytes()
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+
+        self._max_bytes = int(max_bytes)
+        self._max_entries = int(max_entries)
+        self._base_max_entries = int(max_entries)
         self._items: OrderedDict[PreviewKey, NDArray[np.uint8]] = OrderedDict()
+        self._entry_bytes: dict[PreviewKey, int] = {}
+        self._current_bytes = 0
+        self._lock = Lock()
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._oversized_rejections = 0
+        self._oversized_admissions = 0
 
     def __len__(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
     @property
     def capacity(self) -> int:
-        return self._capacity
+        return self._max_entries
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
+    @property
+    def max_bytes(self) -> int:
+        return self._max_bytes
+
+    @property
+    def current_bytes(self) -> int:
+        with self._lock:
+            return self._current_bytes
+
+    def stats(self) -> FrameCacheStats:
+        with self._lock:
+            return FrameCacheStats(
+                count=len(self._items),
+                current_bytes=self._current_bytes,
+                max_bytes=self._max_bytes,
+                max_entries=self._max_entries,
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+                oversized_rejections=self._oversized_rejections,
+                oversized_admissions=self._oversized_admissions,
+            )
 
     def clear(self) -> None:
-        self._items.clear()
+        with self._lock:
+            self._items.clear()
+            self._entry_bytes.clear()
+            self._current_bytes = 0
+            self._max_entries = self._base_max_entries
 
     def contains(self, key: PreviewKey) -> bool:
-        return key in self._items
+        with self._lock:
+            return key in self._items
 
     def get(self, key: PreviewKey) -> NDArray[np.uint8] | None:
-        cached = self._items.get(key)
-        if cached is None:
-            return None
-        self._items.move_to_end(key)
-        return cached
+        with self._lock:
+            cached = self._items.get(key)
+            if cached is None:
+                self._misses += 1
+                return None
+            self._hits += 1
+            self._items.move_to_end(key)
+            return np.ascontiguousarray(cached).copy()
 
     def put(
         self,
@@ -96,13 +176,71 @@ class PreviewFrameCache:
         image: NDArray[np.uint8],
         *,
         expand_to_fit: bool = False,
-    ) -> None:
-        self._items[key] = np.ascontiguousarray(image).copy()
-        self._items.move_to_end(key)
-        if expand_to_fit and len(self._items) > self._capacity:
-            self._capacity = len(self._items)
-        while len(self._items) > self._capacity:
-            self._items.popitem(last=False)
+        allow_eviction: bool = True,
+    ) -> bool:
+        stored = np.ascontiguousarray(image, dtype=np.uint8).copy()
+        nbytes = int(stored.nbytes)
+
+        with self._lock:
+            if expand_to_fit and len(self._items) >= self._max_entries and key not in self._items:
+                # Raise entry cap only — never the byte budget.
+                self._max_entries = len(self._items) + 1
+
+            if nbytes > self._max_bytes:
+                if not allow_eviction:
+                    self._oversized_rejections += 1
+                    return False
+                self._items.clear()
+                self._entry_bytes.clear()
+                self._items[key] = stored
+                self._entry_bytes[key] = nbytes
+                self._current_bytes = nbytes
+                self._items.move_to_end(key)
+                self._oversized_admissions += 1
+                return True
+
+            old_nbytes = self._entry_bytes.get(key)
+            replacing = old_nbytes is not None
+            next_bytes = self._current_bytes - (old_nbytes or 0) + nbytes
+            next_count = len(self._items) if replacing else len(self._items) + 1
+
+            if not allow_eviction:
+                if next_bytes > self._max_bytes or next_count > self._max_entries:
+                    return False
+                if replacing:
+                    self._current_bytes -= old_nbytes or 0
+                self._items[key] = stored
+                self._entry_bytes[key] = nbytes
+                self._current_bytes += nbytes
+                self._items.move_to_end(key)
+                return True
+
+            if replacing:
+                self._current_bytes -= old_nbytes or 0
+            self._items[key] = stored
+            self._entry_bytes[key] = nbytes
+            self._current_bytes += nbytes
+            self._items.move_to_end(key)
+            self._evict_until_fit_unlocked(protect_key=key)
+            return True
+
+    def _evict_until_fit_unlocked(self, *, protect_key: PreviewKey | None = None) -> None:
+        while self._items and (
+            self._current_bytes > self._max_bytes or len(self._items) > self._max_entries
+        ):
+            victim_key = None
+            for candidate in self._items:
+                if candidate != protect_key:
+                    victim_key = candidate
+                    break
+            if victim_key is None:
+                break
+            self._items.pop(victim_key)
+            removed = self._entry_bytes.pop(victim_key, 0)
+            self._current_bytes -= removed
+            self._evictions += 1
+        if self._current_bytes < 0:
+            self._current_bytes = 0
 
 
 def _is_scene_frame_source(reader: object) -> bool:
@@ -116,8 +254,9 @@ def _resolve_path(path: Path) -> Path:
 class PreviewPipeline:
     """EXR raw cache → display transform → uint8 preview cache.
 
-    Non-scene media (video, PNG, …) falls through to ``MediaReader.read_frame``.
-    Changing the display transform clears preview entries but keeps raw EXR frames.
+    Lock order (never invert): ``PreviewPipeline._lock`` → cache locks
+    (RawFrameCache / PreviewFrameCache). OIIO decode runs **without** holding
+    ``_lock``; miss paths re-check under lock after decode.
     """
 
     def __init__(
@@ -127,15 +266,40 @@ class PreviewPipeline:
         *,
         raw_cache_size: int = DEFAULT_RAW_FRAME_CACHE_SIZE,
         preview_cache_size: int = DEFAULT_PREVIEW_CACHE_SIZE,
+        raw_cache_max_bytes: int | None = None,
+        preview_cache_max_bytes: int | None = None,
         raw_cache: RawFrameCache | None = None,
     ) -> None:
         self._reader = reader
         self._display_transform = display_transform or LegacyDisplayTransform()
         self._transform_id = TransformIdentity.from_transform(self._display_transform)
-        self._raw_cache = raw_cache or RawFrameCache(raw_cache_size)
-        self._preview_cache = PreviewFrameCache(preview_cache_size)
+        if raw_cache is not None:
+            self._raw_cache = raw_cache
+        else:
+            raw_bytes = (
+                raw_cache_max_bytes
+                if raw_cache_max_bytes is not None
+                else bytes_from_env_mb("NOVA_RAW_CACHE_MB", DEFAULT_RAW_CACHE_MAX_BYTES)
+            )
+            self._raw_cache = RawFrameCache(
+                max_entries=raw_cache_size,
+                max_bytes=raw_bytes,
+            )
+        preview_bytes = (
+            preview_cache_max_bytes
+            if preview_cache_max_bytes is not None
+            else _default_preview_max_bytes()
+        )
+        self._preview_cache = PreviewFrameCache(
+            max_entries=preview_cache_size,
+            max_bytes=preview_bytes,
+        )
         self._lock = Lock()
-        self._oiio_decode_count = 0
+        self._scene_load_lock = Lock()
+        self._raw_decodes = 0
+        self._preview_generations = 0
+        self._raw_prefetch_skips = 0
+        self._preview_prefetch_skips = 0
 
     @property
     def reader(self) -> MediaReader:
@@ -155,13 +319,29 @@ class PreviewPipeline:
 
     @property
     def preview_cache_count(self) -> int:
-        with self._lock:
-            return len(self._preview_cache)
+        return self._preview_cache.stats().count
 
     @property
     def oiio_decode_count(self) -> int:
-        """Test/diagnostics: number of scene-frame OIIO loads performed by this pipeline."""
-        return self._oiio_decode_count
+        """Backward-compatible alias for ``pipeline_stats.raw_decodes``."""
+        return self._raw_decodes
+
+    @property
+    def raw_cache_stats(self) -> FrameCacheStats:
+        return self._raw_cache.stats()
+
+    @property
+    def preview_cache_stats(self) -> FrameCacheStats:
+        return self._preview_cache.stats()
+
+    @property
+    def pipeline_stats(self) -> PreviewPipelineStats:
+        return PreviewPipelineStats(
+            raw_decodes=self._raw_decodes,
+            preview_generations=self._preview_generations,
+            raw_prefetch_skips=self._raw_prefetch_skips,
+            preview_prefetch_skips=self._preview_prefetch_skips,
+        )
 
     def set_reader(self, reader: MediaReader, *, keep_raw_cache: bool = False) -> None:
         with self._lock:
@@ -171,7 +351,11 @@ class PreviewPipeline:
                 self._raw_cache.clear()
 
     def set_display_transform(self, transform: DisplayTransformProtocol | None) -> None:
-        """Swap exposure/display path; keep EXR raw cache, drop preview cache."""
+        """Swap exposure/display path; keep EXR raw bytes, drop preview cache.
+
+        Lifetime counters (hits/misses/…) on both caches are retained; preview
+        ``count`` / ``current_bytes`` go to 0 via ``clear()``.
+        """
         with self._lock:
             self._display_transform = transform or LegacyDisplayTransform()
             self._transform_id = TransformIdentity.from_transform(self._display_transform)
@@ -193,24 +377,27 @@ class PreviewPipeline:
             key: PreviewKey = (resolved, frame_number, tid)
             cached = self._preview_cache.get(key)
             if cached is not None:
-                return cached.copy()
+                return cached
             transform = self._display_transform
             reader = self._reader
 
-        if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(reader, resolved, frame_number):
+        if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
+            reader, resolved, frame_number
+        ):
             scene = self._get_or_load_scene(reader, resolved, frame_number)
             try:
                 preview = transform.apply(scene.pixels)
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(f"Could not display-transform scene frame: {exc}") from exc
+            self._preview_generations += 1
         else:
             preview = reader.read_frame(resolved, frame_number)
+            self._preview_generations += 1
 
         preview_u8 = np.ascontiguousarray(preview, dtype=np.uint8)
         with self._lock:
-            # Identity may have changed while decoding; store under current id if match.
             if self._transform_id == tid:
-                self._preview_cache.put(key, preview_u8)
+                self._preview_cache.put(key, preview_u8, allow_eviction=True)
         return preview_u8.copy()
 
     def put_preview(
@@ -220,10 +407,15 @@ class PreviewPipeline:
         image: NDArray[np.uint8],
         *,
         expand_to_fit: bool = False,
-    ) -> None:
+        allow_eviction: bool = True,
+    ) -> bool:
         key: PreviewKey = (_resolve_path(path), frame_number, self._transform_id)
-        with self._lock:
-            self._preview_cache.put(key, image, expand_to_fit=expand_to_fit)
+        return self._preview_cache.put(
+            key,
+            image,
+            expand_to_fit=expand_to_fit,
+            allow_eviction=allow_eviction,
+        )
 
     def get_preview(
         self,
@@ -231,11 +423,7 @@ class PreviewPipeline:
         frame_number: int,
     ) -> NDArray[np.uint8] | None:
         key: PreviewKey = (_resolve_path(path), frame_number, self._transform_id)
-        with self._lock:
-            cached = self._preview_cache.get(key)
-            if cached is None:
-                return None
-            return cached.copy()
+        return self._preview_cache.get(key)
 
     def prefetch_raw(
         self,
@@ -245,7 +433,7 @@ class PreviewPipeline:
         *,
         is_current: Callable[[], bool],
     ) -> None:
-        """Warm upcoming EXR scene frames into the raw cache. Swallows failures."""
+        """Warm upcoming EXR scene frames without evicting existing raw entries."""
         if count < 1 or not _is_scene_frame_source(self._reader):
             return
         resolved = _resolve_path(path)
@@ -259,28 +447,105 @@ class PreviewPipeline:
             if not self._frame_is_exr_candidate(reader, resolved, frame_number):
                 continue
             try:
-                self._get_or_load_scene(reader, resolved, frame_number)
+                loaded = self._get_or_load_scene(
+                    reader,
+                    resolved,
+                    frame_number,
+                    allow_eviction=False,
+                )
+                if loaded is None:
+                    self._raw_prefetch_skips += 1
+                    return
             except Exception:
+                self._raw_prefetch_skips += 1
                 continue
+
+    def prefetch_preview(
+        self,
+        path: Path,
+        anchor_frame: int,
+        count: int,
+        *,
+        is_current: Callable[[], bool],
+    ) -> None:
+        """Warm upcoming preview frames without evicting existing preview entries."""
+        resolved = _resolve_path(path)
+        for offset in range(1, count + 1):
+            if not is_current():
+                return
+            frame_number = anchor_frame + offset
+            if self.get_preview(resolved, frame_number) is not None:
+                continue
+            try:
+                # Decode under temporary path; put with no eviction.
+                frame = self._read_frame_for_prefetch(resolved, frame_number)
+            except Exception:
+                self._preview_prefetch_skips += 1
+                continue
+            stored = self.put_preview(
+                resolved,
+                frame_number,
+                frame,
+                allow_eviction=False,
+            )
+            if not stored:
+                self._preview_prefetch_skips += 1
+                return
+
+    def _read_frame_for_prefetch(
+        self,
+        resolved: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8]:
+        """Like read_frame but does not write the preview cache (caller decides)."""
+        with self._lock:
+            transform = self._display_transform
+            reader = self._reader
+            tid = self._transform_id
+
+        if _is_scene_frame_source(reader) and self._frame_is_exr_candidate(
+            reader, resolved, frame_number
+        ):
+            scene = self._get_or_load_scene(
+                reader, resolved, frame_number, allow_eviction=False
+            )
+            if scene is None:
+                raise RuntimeError("raw prefetch could not admit scene frame")
+            preview = transform.apply(scene.pixels)
+            self._preview_generations += 1
+        else:
+            preview = reader.read_frame(resolved, frame_number)
+            self._preview_generations += 1
+        del tid
+        return np.ascontiguousarray(preview, dtype=np.uint8)
 
     def _get_or_load_scene(
         self,
         reader: MediaReader,
         resolved: Path,
         frame_number: int,
-    ) -> SceneFrame:
+        *,
+        allow_eviction: bool = True,
+    ) -> SceneFrame | None:
         cached = self._raw_cache.get(resolved, frame_number)
         if cached is not None:
             return cached
-        # Serialize miss→load so concurrent preview/prefetch workers share one OIIO read.
-        with self._lock:
+
+        # Serialize miss→load so concurrent workers share one OIIO read.
+        # Do not hold RawFrameCache.lock across OIIO; hold only this load lock.
+        with self._scene_load_lock:
             cached = self._raw_cache.get(resolved, frame_number)
             if cached is not None:
                 return cached
             scene = reader.read_scene_frame(resolved, frame_number)  # type: ignore[attr-defined]
-            self._oiio_decode_count += 1
-            self._raw_cache.put(scene)
-            return self._raw_cache.get(resolved, frame_number) or scene
+            self._raw_decodes += 1
+            admitted = self._raw_cache.put(scene, allow_eviction=allow_eviction)
+            if admitted:
+                return scene
+            if allow_eviction:
+                return scene
+            return None
+
 
     def _frame_is_exr_candidate(
         self,
@@ -288,14 +553,8 @@ class PreviewPipeline:
         resolved: Path,
         frame_number: int,
     ) -> bool:
-        """Cheap probe: sequence dir + inspect pixel_format, or try frame path suffix via listing.
-
-        Avoids raising when frame is PNG mixed into a folder; relies on read_scene_frame
-        for definitive unsupported errors when we already believe the slot is EXR.
-        """
         del reader
         try:
-            # Single file path is video-like — no scene frames.
             if resolved.is_file():
                 return resolved.suffix.lower() == ".exr"
             if not resolved.is_dir():

@@ -11,8 +11,16 @@ from nova_layer.adapters.color.display_transform import (
     DisplayTransformProtocol,
     LegacyDisplayTransform,
 )
-from nova_layer.app.preview_pipeline import DEFAULT_PREVIEW_CACHE_SIZE, PreviewPipeline
-from nova_layer.app.raw_frame_cache import DEFAULT_RAW_FRAME_CACHE_SIZE
+from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
+from nova_layer.app.preview_pipeline import (
+    DEFAULT_PREVIEW_CACHE_MAX_BYTES,
+    DEFAULT_PREVIEW_CACHE_SIZE,
+    PreviewPipeline,
+)
+from nova_layer.app.raw_frame_cache import (
+    DEFAULT_RAW_CACHE_MAX_BYTES,
+    DEFAULT_RAW_FRAME_CACHE_SIZE,
+)
 from nova_layer.ports.media import MediaReader
 
 _DEFAULT_PREFETCH_COUNT = 4
@@ -53,7 +61,7 @@ class DecodeWorker(QRunnable):
 
 
 class PrefetchWorker(QRunnable):
-    """Warm upcoming preview frames (and EXR raw via the pipeline) without emitting."""
+    """Warm upcoming raw/preview frames without evicting foreground cache entries."""
 
     def __init__(
         self,
@@ -72,32 +80,21 @@ class PrefetchWorker(QRunnable):
 
     def run(self) -> None:
         service = self._service
-        # Prefer raw EXR warm first so exposure scrub reuses OIIO results.
+        is_current = lambda: service._prefetch_generation_active(self._generation)
         service._pipeline.prefetch_raw(
             self._path,
             self._anchor_frame,
             self._count,
-            is_current=lambda: service._prefetch_generation_active(self._generation),
+            is_current=is_current,
         )
-        for offset in range(1, self._count + 1):
-            if not service._prefetch_generation_active(self._generation):
-                return
-            frame_number = self._anchor_frame + offset
-            with service._lock:
-                if not service._prefetch_generation_active_unlocked(self._generation):
-                    return
-                if service._pipeline.get_preview(self._path, frame_number) is not None:
-                    continue
-                pipeline = service._pipeline
-            try:
-                frame = pipeline.read_frame(self._path, frame_number)
-            except Exception:
-                continue
-            with service._lock:
-                if not service._prefetch_generation_active_unlocked(self._generation):
-                    return
-                # read_frame already cached preview under current transform identity
-                del frame
+        if not is_current():
+            return
+        service._pipeline.prefetch_preview(
+            self._path,
+            self._anchor_frame,
+            self._count,
+            is_current=is_current,
+        )
 
 
 class FrameDecodeService(QObject):
@@ -111,6 +108,9 @@ class FrameDecodeService(QObject):
         display_transform: DisplayTransformProtocol | None = None,
         cache_size: int = DEFAULT_PREVIEW_CACHE_SIZE,
         raw_cache_size: int = DEFAULT_RAW_FRAME_CACHE_SIZE,
+        preview_cache_size: int | None = None,
+        raw_cache_max_bytes: int | None = None,
+        preview_cache_max_bytes: int | None = None,
         prefetch_count: int = _DEFAULT_PREFETCH_COUNT,
         thread_pool: QThreadPool | None = None,
         pipeline: PreviewPipeline | None = None,
@@ -123,11 +123,14 @@ class FrameDecodeService(QObject):
             transform = getattr(reader, "display_transform", None)
         if transform is None:
             transform = LegacyDisplayTransform()
+        entries = preview_cache_size if preview_cache_size is not None else cache_size
         self._pipeline = pipeline or PreviewPipeline(
             reader,
             transform,
             raw_cache_size=raw_cache_size,
-            preview_cache_size=cache_size,
+            preview_cache_size=entries,
+            raw_cache_max_bytes=raw_cache_max_bytes,
+            preview_cache_max_bytes=preview_cache_max_bytes,
         )
         self._prefetch_count = prefetch_count
         self._prefetch_generation = 0
@@ -143,6 +146,18 @@ class FrameDecodeService(QObject):
     @property
     def pipeline(self) -> PreviewPipeline:
         return self._pipeline
+
+    @property
+    def raw_cache_stats(self) -> FrameCacheStats:
+        return self._pipeline.raw_cache_stats
+
+    @property
+    def preview_cache_stats(self) -> FrameCacheStats:
+        return self._pipeline.preview_cache_stats
+
+    @property
+    def pipeline_stats(self) -> PreviewPipelineStats:
+        return self._pipeline.pipeline_stats
 
     @property
     def reader(self) -> MediaReader:
@@ -199,6 +214,7 @@ class FrameDecodeService(QObject):
             frame_number,
             image,
             expand_to_fit=expand_to_fit,
+            allow_eviction=True,
         )
 
     def read_frame(self, path: Path, frame_number: int) -> NDArray[np.uint8]:
@@ -267,3 +283,13 @@ class FrameDecodeService(QObject):
         )
         if finished is not None:
             self._active_workers.discard(finished)
+
+
+# Re-export defaults for callers / tests.
+__all__ = [
+    "DEFAULT_PREVIEW_CACHE_MAX_BYTES",
+    "DEFAULT_PREVIEW_CACHE_SIZE",
+    "DEFAULT_RAW_CACHE_MAX_BYTES",
+    "DEFAULT_RAW_FRAME_CACHE_SIZE",
+    "FrameDecodeService",
+]
