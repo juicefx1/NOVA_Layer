@@ -1,18 +1,23 @@
 # NOVA Layer Color Pipeline
 
-**Status:** Active (Phase 8 / Phase 9A lock / Phase 10A True Scene / Phase 10B metadata)  
+**Status:** Active (Phase 8 / Phase 9A lock / Phase 10A–10B / Phase 10C-1 contracts)  
 **Audience:** Developer, Maintainer  
 **Scope:** Pixel contracts, processing color policies, raw/preview/source caches, Smart Layer render/export color metadata.
 
 This document records the color pipeline completed through Phase 8, with True Scene
-export (10A) and SceneFrame color-space tagging (10B). System-layer architecture
-remains in `ARCHITECTURE.md`. This file is the authority for viewer / processing /
-render **pixel contracts** and cache behaviour.
+export (10A), SceneFrame color-space tagging (10B), and working-space **contracts**
+(10C-1). System-layer architecture remains in `ARCHITECTURE.md`. This file is the
+authority for viewer / processing / render **pixel contracts** and cache behaviour.
 
 Authority for the SOURCE bake identity string:
 
 - Code: `nova_layer.app.processing_frames.SOURCE_TRANSFORM_VERSION`
 - Current value: `source_legacy_srgb_v1`
+
+Working-space converter identity (no pixel convert in 10C-1):
+
+- Code: `nova_layer.app.working_space.WORKING_CONVERTER_VERSION`
+- Current value: `working_scene_v1`
 
 If the code constant changes, update this document and golden tests together.
 
@@ -97,7 +102,8 @@ True Scene pixels are produced only by the dedicated export format.
 EXR (OIIO)
   → SceneFrameSource / ImageSequenceReader  (+ optional color_space tag)
   → RawFrameCache          (float32 SceneFrame; key = path, frame)
-  → Exposure + DisplayTransform (session; PREVIEW uses input_color_space)
+  → (Phase 10C-2+) WorkingSceneCache  (working float; key = path, frame, WorkingTransformIdentity)
+  → Exposure + DisplayTransform (session; PREVIEW uses input_color_space today)
   → PreviewFrameCache      (PREVIEW uint8)
 
 RawFrameCache
@@ -122,8 +128,24 @@ Cache objects:
 | Cache | Payload | Primary consumers |
 |---|---|---|
 | Raw | float32 EXR `SceneFrame` (+ tags) | SCENE API, PREVIEW bake, SOURCE bake, True Scene |
+| Working (10C-1 skeleton) | float32 `WorkingSceneFrame` | Not wired — PREVIEW/SOURCE/export follow-on |
 | Preview | PREVIEW uint8 | Viewer, validation, BG preview, default render |
 | Source | SOURCE uint8 | SAM, skeleton, propagation, SOURCE render |
+
+### Working + Source v1 invalidation contract (Phase 10C-1 documented; wired in 10C-2+)
+
+| Event | Raw | Working | Preview | Source v1 |
+|---|---|---|---|---|
+| Exposure | **keep** | **keep** | **clear** | **keep** |
+| Display / View | **keep** | **keep** | **clear** | **keep** |
+| Interpretation CS (`input_color_space`) | **keep** | **invalidate if used as fallback source** | **clear** | **keep** |
+| Working CS | **keep** | **clear** | **clear** | **keep** |
+| OCIO Config | **keep** | **clear** | **clear** | **keep** |
+| Media relink | **clear** | **clear** | **clear** | **clear** |
+
+Phase 10C-1 ships `WorkingSpaceSettings`, `WorkingTransformIdentity`,
+`WorkingSceneFrame`, and `WorkingSceneCache` **without** connecting them to
+`PreviewPipeline` or converting pixels.
 
 ---
 
@@ -175,8 +197,11 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
    `premultiplied=false`.
 7. **`ProcessingColorPolicy.SCENE` remains rejected for Smart Layer render.**
    True Scene is export-only.
-8. **Canonical working-space conversion / ACEScg normalization** is a **follow-on** phase;
-   Phase 10B only tags and separates source vs interpretation metadata.
+8. **Canonical working-space conversion** is staged:
+   - **Phase 10C-1:** contracts / identity / diagnostics / cache skeleton only
+     (`WorkingSpaceSettings`, `WorkingSceneFrame`, `WorkingSceneCache`);
+     `working_enabled=false` by default; **no** source→working pixel convert.
+   - **Phase 10C-2+:** optional Working path for PREVIEW, then SOURCE v2 / export.
 
 ---
 
@@ -199,6 +224,9 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
 |---|---|
 | Policy enum / version | `nova_layer.app.processing_frames` |
 | SceneFrame / tags | `nova_layer.ports.scene_frames` |
+| Working space contracts | `nova_layer.app.working_space` |
+| WorkingSceneFrame | `nova_layer.ports.scene_frames.WorkingSceneFrame` |
+| WorkingSceneCache | `nova_layer.app.working_scene_cache` |
 | SOURCE risk helper | `nova_layer.app.scene_color_space` |
 | Pipeline / caches | `nova_layer.app.preview_pipeline` |
 | Decode façade | `nova_layer.app.frame_decode_service` |

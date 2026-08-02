@@ -1,4 +1,4 @@
-"""Read-only Color Pipeline diagnostics snapshot (Phase 9B / 10B).
+"""Read-only Color Pipeline diagnostics snapshot (Phase 9B / 10B / 10C-1).
 
 Assembles existing cache / transform / resolve state without duplicating cache
 policy or mutating runtime caches beyond optional raw-cache peek.
@@ -7,7 +7,7 @@ policy or mutating runtime caches beyond optional raw-cache peek.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +16,32 @@ from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.preview_pipeline import PreviewPipeline, TransformIdentity
 from nova_layer.app.scene_color_space import source_transform_warning as warning_for_source
+from nova_layer.app.working_space import (
+    WORKING_CONVERTER_VERSION,
+    WorkingSpaceSettings,
+    resolve_working_space_intent,
+)
 
 _BYTES_PER_MIB = 1024 * 1024
+
+_EMPTY_CACHE = FrameCacheStats(
+    count=0,
+    current_bytes=0,
+    max_bytes=0,
+    max_entries=None,
+    hits=0,
+    misses=0,
+    evictions=0,
+    oversized_rejections=0,
+    oversized_admissions=0,
+)
+
+_EMPTY_PIPELINE = PreviewPipelineStats(
+    raw_decodes=0,
+    preview_generations=0,
+    raw_prefetch_skips=0,
+    preview_prefetch_skips=0,
+)
 
 
 def hit_rate(hits: int, misses: int) -> float | None:
@@ -101,25 +125,14 @@ class ColorPipelineDiagnostics:
     interpretation_color_space: str | None = None
     source_transform_warning: str | None = None
 
-
-_EMPTY_CACHE = FrameCacheStats(
-    count=0,
-    current_bytes=0,
-    max_bytes=0,
-    max_entries=None,
-    hits=0,
-    misses=0,
-    evictions=0,
-    oversized_rejections=0,
-    oversized_admissions=0,
-)
-
-_EMPTY_PIPELINE = PreviewPipelineStats(
-    raw_decodes=0,
-    preview_generations=0,
-    raw_prefetch_skips=0,
-    preview_prefetch_skips=0,
-)
+    # Phase 10C-1 — working-space intent (no conversion yet).
+    working_enabled: bool = False
+    requested_working_color_space: str | None = None
+    resolved_working_color_space: str | None = None
+    working_resolution_source: str | None = None
+    working_converter_version: str | None = None
+    working_cache: FrameCacheStats = field(default=_EMPTY_CACHE)
+    working_warnings: tuple[str, ...] = ()
 
 
 def empty_frame_cache_stats() -> FrameCacheStats:
@@ -157,6 +170,8 @@ def build_color_pipeline_diagnostics(
     last_render_color_policy: str | None = None,
     extra_warnings: Sequence[str] = (),
     active_policy: str | None = "preview",
+    working_settings: WorkingSpaceSettings | None = None,
+    working_cache_stats: FrameCacheStats | None = None,
 ) -> ColorPipelineDiagnostics:
     """Compose a safe diagnostics snapshot from available runtime pieces."""
     raw = pipeline.raw_cache_stats if pipeline is not None else _EMPTY_CACHE
@@ -219,6 +234,9 @@ def build_color_pipeline_diagnostics(
     if src_warn and src_warn not in warnings:
         warnings.append(src_warn)
 
+    intent = resolve_working_space_intent(working_settings)
+    working_cache = working_cache_stats if working_cache_stats is not None else _EMPTY_CACHE
+
     return ColorPipelineDiagnostics(
         active_backend=backend,
         active_policy=active_policy,
@@ -253,11 +271,24 @@ def build_color_pipeline_diagnostics(
         source_color_space_source=source_src,
         interpretation_color_space=input_cs,
         source_transform_warning=src_warn,
+        working_enabled=intent.enabled,
+        requested_working_color_space=intent.requested_color_space,
+        resolved_working_color_space=None,
+        working_resolution_source=intent.resolution_source,
+        working_converter_version=(
+            intent.converter_version if intent.enabled else WORKING_CONVERTER_VERSION
+        ),
+        working_cache=working_cache,
+        working_warnings=intent.warnings,
     )
 
 
 def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> str:
     """Plain-text dump suitable for clipboard copy."""
+    working_hit = hit_rate(
+        diagnostics.working_cache.hits,
+        diagnostics.working_cache.misses,
+    )
     lines = [
         "NOVA Layer Color Pipeline Diagnostics",
         f"Backend: {diagnostics.active_backend}",
@@ -279,6 +310,21 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"{diagnostics.interpretation_color_space or '—'}",
         f"SOURCE transform warning: "
         f"{diagnostics.source_transform_warning or '—'}",
+        "",
+        "Working Space:",
+        f"  Enabled: {diagnostics.working_enabled}",
+        f"  Requested: {diagnostics.requested_working_color_space or '—'}",
+        f"  Resolved: {diagnostics.resolved_working_color_space or '—'}",
+        f"  Resolution source: {diagnostics.working_resolution_source or '—'}",
+        f"  Converter version: {diagnostics.working_converter_version or '—'}",
+        f"  "
+        + _format_cache_line(
+            "Working Cache",
+            diagnostics.working_cache,
+            working_hit,
+            bytes_to_mib(diagnostics.working_cache.current_bytes),
+            bytes_to_mib(diagnostics.working_cache.max_bytes),
+        ),
         "",
         _format_cache_line(
             "Raw Cache",
@@ -308,6 +354,10 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"Preview prefetch skips: {diagnostics.pipeline.preview_prefetch_skips}",
         f"Last render color policy: {diagnostics.last_render_color_policy or '—'}",
     ]
+    if diagnostics.working_warnings:
+        lines.append("")
+        lines.append("Working warnings:")
+        lines.extend(f"  - {item}" for item in diagnostics.working_warnings)
     if diagnostics.warnings:
         lines.append("")
         lines.append("Warnings:")

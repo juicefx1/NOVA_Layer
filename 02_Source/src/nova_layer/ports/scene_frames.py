@@ -34,6 +34,31 @@ class SceneFrame:
     color_space_source: str = "unspecified"
 
 
+@dataclass(frozen=True, slots=True)
+class WorkingSceneFrame:
+    """Canonical working-space floating RGB (Phase 10C+).
+
+    ``pixels`` are float32 RGB in ``working_color_space`` after a source→working
+    conversion. Display / view / exposure are **not** applied.
+
+    Phase 10C-1 defines the type only — no production construction path yet.
+    Callers must not mutate ``pixels`` in place after construction; caches
+    copy-on-put / copy-on-get.
+    """
+
+    path: Path
+    frame_number: int
+    pixels: NDArray[np.float32]
+    width: int
+    height: int
+    source_color_space: str
+    working_color_space: str
+    ocio_config_identity: str
+    converter_version: str
+    channels: int = 3
+    pixel_format: str = "float32_rgb"
+
+
 class SceneFrameSource(Protocol):
     """Additive source for file-native scene frames. Does not replace MediaReader."""
 
