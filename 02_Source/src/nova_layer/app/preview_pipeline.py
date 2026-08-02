@@ -18,6 +18,7 @@ from nova_layer.adapters.color.display_transform import (
     create_display_transform,
 )
 from nova_layer.adapters.color.exposure_transform import ExposureTransform
+from nova_layer.app.false_color import FalseColorCache
 from nova_layer.app.frame_cache_stats import (
     FrameCacheStats,
     PreviewPipelineStats,
@@ -396,10 +397,15 @@ class PreviewPipeline:
         self._preview_prefetch_skips = 0
         self._working_conversions = 0
         self._histogram_cache = HistogramAnalysisCache()
+        self._false_color_cache = FalseColorCache()
 
     @property
     def histogram_cache(self) -> HistogramAnalysisCache:
         return self._histogram_cache
+
+    @property
+    def false_color_cache(self) -> FalseColorCache:
+        return self._false_color_cache
 
     @property
     def reader(self) -> MediaReader:
@@ -547,6 +553,7 @@ class PreviewPipeline:
             if not keep_raw_cache:
                 self._raw_cache.clear()
             self._histogram_cache.clear()
+            self._false_color_cache.clear()
 
     def set_display_transform(self, transform: DisplayTransformProtocol | None) -> None:
         """Swap exposure/display path; keep EXR raw + SOURCE; drop preview.
@@ -583,6 +590,7 @@ class PreviewPipeline:
             self._working_warnings = self._resolved_working.warnings
             self._preview_cache.clear()
             self._histogram_cache.invalidate_preview()
+            self._false_color_cache.invalidate_preview()
 
     def set_working_space_settings(
         self,
@@ -600,11 +608,13 @@ class PreviewPipeline:
             self._working_cache.clear()
             self._preview_cache.clear()
             self._histogram_cache.invalidate_preview()
+            self._false_color_cache.invalidate_preview()
 
     def clear_preview_cache(self) -> None:
         with self._lock:
             self._preview_cache.clear()
             self._histogram_cache.invalidate_preview()
+            self._false_color_cache.invalidate_preview()
 
     def clear_working_cache(self) -> None:
         with self._lock:
@@ -617,6 +627,7 @@ class PreviewPipeline:
             self._working_cache.clear()
             self._raw_cache.clear()
             self._histogram_cache.clear()
+            self._false_color_cache.clear()
 
     def read_frame(
         self,

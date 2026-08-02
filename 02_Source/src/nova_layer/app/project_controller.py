@@ -42,6 +42,10 @@ from nova_layer.app.color_pipeline_diagnostics import (
     build_color_pipeline_diagnostics,
 )
 from nova_layer.app.frame_decode_service import FrameDecodeService
+from nova_layer.app.false_color import (
+    FalseColorMode,
+    get_false_color_frame_for_decoder,
+)
 from nova_layer.app.histogram_analysis import FrameHistogram, get_frame_histogram_for_decoder
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
@@ -432,6 +436,31 @@ class ProjectController(QObject):
             Path(shot.media.source_path),
             frame_number,
             policy,
+            allow_decode=allow_decode,
+        )
+
+    def get_false_color_frame(
+        self,
+        *,
+        mode: FalseColorMode,
+        opacity: float = 1.0,
+        allow_decode: bool = True,
+    ) -> tuple[NDArray[np.uint8] | None, str | None]:
+        """Viewer-only false-color RGB for the active shot / preview frame."""
+        shot = self.active_shot
+        if shot is None or shot.media is None or shot.media.source_path is None:
+            return None, "No media"
+        frame_number = (
+            int(self._preview_frame_number)
+            if self._preview_frame_number is not None
+            else int(shot.master_frame)
+        )
+        return get_false_color_frame_for_decoder(
+            self._frame_decoder,
+            Path(shot.media.source_path),
+            frame_number,
+            mode=mode,
+            opacity=opacity,
             allow_decode=allow_decode,
         )
 

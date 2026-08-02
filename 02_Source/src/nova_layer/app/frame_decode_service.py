@@ -12,6 +12,10 @@ from nova_layer.adapters.color.display_transform import (
     LegacyDisplayTransform,
 )
 from nova_layer.app.color_pipeline_diagnostics import ColorPipelineDiagnostics
+from nova_layer.app.false_color import (
+    FalseColorMode,
+    get_false_color_frame_for_decoder,
+)
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.histogram_analysis import FrameHistogram, get_frame_histogram_for_decoder
 from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
@@ -309,6 +313,25 @@ class FrameDecodeService(QObject):
             path,
             frame_number,
             policy,
+            allow_decode=allow_decode,
+        )
+
+    def get_false_color_frame(
+        self,
+        path: Path,
+        frame_number: int,
+        *,
+        mode: FalseColorMode,
+        opacity: float = 1.0,
+        allow_decode: bool = True,
+    ) -> tuple[NDArray[np.uint8] | None, str | None]:
+        """Viewer-only false-color RGB (does not mutate caches with overlay pixels)."""
+        return get_false_color_frame_for_decoder(
+            self,
+            path,
+            frame_number,
+            mode=mode,
+            opacity=opacity,
             allow_decode=allow_decode,
         )
 

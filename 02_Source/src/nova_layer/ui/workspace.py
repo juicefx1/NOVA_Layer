@@ -45,9 +45,11 @@ from nova_layer.app.effective_color_settings import (
     apply_effective_color_settings,
 )
 from nova_layer.adapters.color.settings import ResolvedColorSettings
+from nova_layer.app.false_color import FalseColorMode, FalseColorSettings, legend_for_mode
 from nova_layer.app.pixel_inspection import empty_pixel_inspection
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
+from nova_layer.ui.false_color_controls import FalseColorControlsPanel
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.histogram_panel import HistogramPanel
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
@@ -88,12 +90,18 @@ class WorkspaceWindow(QMainWindow):
         self._histogram_refresh_timer.setSingleShot(True)
         self._histogram_refresh_timer.setInterval(150)
         self._histogram_refresh_timer.timeout.connect(self._flush_histogram_refresh)
+        self._false_color_settings = FalseColorSettings()
+        self._false_color_refresh_timer = QTimer(self)
+        self._false_color_refresh_timer.setSingleShot(True)
+        self._false_color_refresh_timer.setInterval(120)
+        self._false_color_refresh_timer.timeout.connect(self._flush_false_color_refresh)
         self.setObjectName("workspaceWindow")
         self.setWindowTitle(f"{project.name} — NOVA Layer")
         self.resize(1280, 820)
         self._build_menus()
         self._build_pixel_inspector_dock()
         self._build_histogram_dock()
+        self._build_false_color_dock()
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -106,6 +114,7 @@ class WorkspaceWindow(QMainWindow):
         self.setCentralWidget(root)
         self._wire_pixel_inspector()
         self._wire_histogram_panel()
+        self._wire_false_color_panel()
 
         status = QStatusBar()
         status.showMessage("Ready — import media to begin")
@@ -155,6 +164,7 @@ class WorkspaceWindow(QMainWindow):
         )
         self._last_color_application = application
         self._schedule_histogram_refresh()
+        self._schedule_false_color_refresh()
         return application
 
     @property
@@ -194,6 +204,11 @@ class WorkspaceWindow(QMainWindow):
         self.histogram_action.setCheckable(True)
         self.histogram_action.setChecked(False)
         self.histogram_action.toggled.connect(self._set_histogram_visible)
+        self.false_color_action = view_menu.addAction("False Color")
+        self.false_color_action.setObjectName("falseColorAction")
+        self.false_color_action.setCheckable(True)
+        self.false_color_action.setChecked(False)
+        self.false_color_action.toggled.connect(self._set_false_color_visible)
 
     def _build_pixel_inspector_dock(self) -> None:
         self.pixel_inspector_panel = PixelInspectorPanel()
@@ -222,6 +237,104 @@ class WorkspaceWindow(QMainWindow):
         self.histogram_dock.visibilityChanged.connect(
             self._on_histogram_visibility_changed
         )
+
+    def _build_false_color_dock(self) -> None:
+        self.false_color_panel = FalseColorControlsPanel()
+        self.false_color_dock = QDockWidget("False Color", self)
+        self.false_color_dock.setObjectName("falseColorDock")
+        self.false_color_dock.setWidget(self.false_color_panel)
+        self.false_color_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.false_color_dock)
+        self.false_color_dock.hide()
+        self.false_color_dock.visibilityChanged.connect(
+            self._on_false_color_visibility_changed
+        )
+
+    def _wire_false_color_panel(self) -> None:
+        self.false_color_panel.settings_changed.connect(self._on_false_color_settings)
+        self.false_color_panel.reset_requested.connect(self._on_false_color_reset)
+
+    def _set_false_color_visible(self, visible: bool) -> None:
+        self.false_color_dock.setVisible(visible)
+        if visible:
+            self._schedule_false_color_refresh(force=True)
+        else:
+            self._false_color_refresh_timer.stop()
+            # Closing the dock restores original preview display when mode was active.
+            if self._false_color_settings.mode is not FalseColorMode.OFF:
+                self.viewer.clear_false_color()
+
+    def _on_false_color_visibility_changed(self, visible: bool) -> None:
+        if self.false_color_action.isChecked() != visible:
+            self.false_color_action.blockSignals(True)
+            self.false_color_action.setChecked(visible)
+            self.false_color_action.blockSignals(False)
+        if visible:
+            self._schedule_false_color_refresh(force=True)
+        else:
+            self._false_color_refresh_timer.stop()
+            if self._false_color_settings.mode is not FalseColorMode.OFF:
+                self.viewer.clear_false_color()
+
+    def _on_false_color_settings(self, settings: object) -> None:
+        if isinstance(settings, FalseColorSettings):
+            self._false_color_settings = settings
+        self._schedule_false_color_refresh(force=True)
+
+    def _on_false_color_reset(self) -> None:
+        self._false_color_settings = FalseColorSettings()
+        self.viewer.clear_false_color()
+        self.false_color_panel.set_status("Reset to Off")
+
+    def _schedule_false_color_refresh(self, *, force: bool = False) -> None:
+        if not getattr(self, "false_color_dock", None):
+            return
+        settings = self._false_color_settings
+        if settings.mode is FalseColorMode.OFF:
+            self.viewer.clear_false_color()
+            if getattr(self, "false_color_panel", None):
+                self.false_color_panel.set_status("Off — original preview")
+            return
+        if not self.false_color_dock.isVisible():
+            return
+        if force:
+            self._false_color_refresh_timer.start(0)
+        elif not self._false_color_refresh_timer.isActive():
+            self._false_color_refresh_timer.start()
+
+    def _flush_false_color_refresh(self) -> None:
+        if not self.false_color_dock.isVisible():
+            return
+        self._refresh_false_color()
+
+    def _refresh_false_color(self) -> None:
+        settings = self._false_color_settings
+        if settings.mode is FalseColorMode.OFF:
+            self.viewer.clear_false_color()
+            self.false_color_panel.set_status("Off — original preview")
+            return
+        if not self.false_color_dock.isVisible():
+            return
+        rgb, warning = self.controller.get_false_color_frame(
+            mode=settings.mode,
+            opacity=settings.opacity,
+        )
+        if rgb is None:
+            self.viewer.clear_false_color()
+            self.false_color_panel.set_status(warning or "No media")
+            return
+        legend = [
+            (band.label, band.color)
+            for band in legend_for_mode(settings.mode)
+        ]
+        self.viewer.set_false_color_frame(
+            rgb,
+            legend=legend,
+            show_legend=settings.show_legend,
+        )
+        self.false_color_panel.set_status(warning or "Ready")
 
     def _wire_histogram_panel(self) -> None:
         self.histogram_panel.policy_changed.connect(
@@ -797,6 +910,7 @@ class WorkspaceWindow(QMainWindow):
         ):
             self._schedule_pixel_inspection(*self._pixel_hover_xy)
         self._schedule_histogram_refresh()
+        self._schedule_false_color_refresh()
 
     def _timeline_changed(self, frame_number: int) -> None:
         self._discard_skeleton_correction()

@@ -53,6 +53,9 @@ class GuidanceViewer(QLabel):
         self.setMinimumSize(640, 360)
         self.setMouseTracking(True)
         self._frame: NDArray[np.uint8] | None = None
+        self._false_color_frame: NDArray[np.uint8] | None = None
+        self._false_color_legend: list[tuple[str, tuple[int, int, int]]] = []
+        self._show_false_color_legend = False
         self._image: QImage | None = None
         self._mask_overlay: QImage | None = None
         self._display_rect = QRect()
@@ -139,17 +142,57 @@ class GuidanceViewer(QLabel):
         return True
 
     def set_frame(self, frame: NDArray[np.uint8]) -> None:
+        """Store the original PREVIEW buffer; display may use false-color overlay."""
         self._frame = np.ascontiguousarray(frame)
-        height, width, channels = self._frame.shape
+        self._rebuild_display_image()
+        self._update_display_rect()
+        self.update()
+
+    @property
+    def original_frame(self) -> NDArray[np.uint8] | None:
+        """Untouched preview buffer (never holds false-color pixels)."""
+        if self._frame is None:
+            return None
+        return np.ascontiguousarray(self._frame)
+
+    def set_false_color_frame(
+        self,
+        frame: NDArray[np.uint8] | None,
+        *,
+        legend: list[tuple[str, tuple[int, int, int]]] | None = None,
+        show_legend: bool = False,
+    ) -> None:
+        """Set viewer-only false-color display buffer (does not replace ``_frame``)."""
+        if frame is None:
+            self._false_color_frame = None
+        else:
+            self._false_color_frame = np.ascontiguousarray(frame)
+        self._false_color_legend = list(legend or [])
+        self._show_false_color_legend = bool(show_legend) and bool(self._false_color_legend)
+        self._rebuild_display_image()
+        self._update_display_rect()
+        self.update()
+
+    def clear_false_color(self) -> None:
+        self.set_false_color_frame(None, legend=None, show_legend=False)
+
+    def _rebuild_display_image(self) -> None:
+        display = (
+            self._false_color_frame
+            if self._false_color_frame is not None
+            else self._frame
+        )
+        if display is None:
+            self._image = None
+            return
+        height, width, channels = display.shape
         self._image = QImage(
-            self._frame.data,
+            display.data,
             width,
             height,
             channels * width,
             QImage.Format.Format_RGB888,
         ).copy()
-        self._update_display_rect()
-        self.update()
 
     def widget_to_image_coordinates(
         self,
@@ -268,7 +311,26 @@ class GuidanceViewer(QLabel):
                 Qt.TransformationMode.SmoothTransformation,
             )
             painter.drawPixmap(self._display_rect, overlay)
+        if self._show_false_color_legend and self._false_color_legend:
+            self._paint_false_color_legend(painter)
         self._paint_guidance(painter)
+
+    def _paint_false_color_legend(self, painter: QPainter) -> None:
+        if self._display_rect.isEmpty():
+            return
+        x = self._display_rect.left() + 8
+        y = self._display_rect.top() + 8
+        row_h = 16
+        box = 10
+        painter.setPen(QPen(QColor("#111318"), 1))
+        bg = QColor(17, 19, 24, 180)
+        height = 8 + len(self._false_color_legend) * row_h
+        painter.fillRect(QRect(x - 4, y - 4, 168, height), bg)
+        for label, color in self._false_color_legend:
+            painter.fillRect(x, y + 2, box, box, QColor(*color))
+            painter.setPen(QColor("#e8ecf4"))
+            painter.drawText(x + box + 6, y + box, label)
+            y += row_h
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
