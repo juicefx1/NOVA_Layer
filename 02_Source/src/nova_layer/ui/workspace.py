@@ -44,6 +44,7 @@ from nova_layer.app.effective_color_settings import (
     apply_effective_color_settings,
 )
 from nova_layer.adapters.color.settings import ResolvedColorSettings
+from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
@@ -154,6 +155,15 @@ class WorkspaceWindow(QMainWindow):
         self.color_settings_action = view_menu.addAction("Color Settings…")
         self.color_settings_action.setObjectName("colorSettingsAction")
         self.color_settings_action.triggered.connect(self._open_color_settings)
+        self.color_pipeline_diagnostics_action = view_menu.addAction(
+            "Color Pipeline Diagnostics…"
+        )
+        self.color_pipeline_diagnostics_action.setObjectName(
+            "colorPipelineDiagnosticsAction"
+        )
+        self.color_pipeline_diagnostics_action.triggered.connect(
+            self._open_color_pipeline_diagnostics
+        )
 
     def _open_color_settings(self) -> None:
         dialog = ColorSettingsDialog(
@@ -162,6 +172,10 @@ class WorkspaceWindow(QMainWindow):
             workspace=self._workspace,
             apply_effective=self._apply_effective_color_settings,
         )
+        dialog.exec()
+
+    def _open_color_pipeline_diagnostics(self) -> None:
+        dialog = ColorPipelineDiagnosticsDialog(self.controller, parent=self)
         dialog.exec()
 
     def _build_header(self, project: Project) -> QHBoxLayout:

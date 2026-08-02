@@ -131,6 +131,7 @@ def apply_effective_color_settings(
     )
     transform = build_transform_from_resolved(resolved)
     controller.set_display_transform(transform)
+    controller.record_resolved_color_settings(resolved)
     return EffectiveColorApplication(resolved=resolved, transform=transform)
 
 

@@ -31,6 +31,11 @@ from nova_layer.adapters.media.pyav_reader import PyAvMediaReader
 from nova_layer.adapters.persistence.json_store import JsonProjectStore, ProjectStoreError
 from nova_layer.adapters.persistence.mask_store import MaskStoreError, PngMaskStore
 from nova_layer.adapters.persistence.preview_store import PngPreviewStore, PreviewStoreError
+from nova_layer.adapters.color.settings import ResolvedColorSettings
+from nova_layer.app.color_pipeline_diagnostics import (
+    ColorPipelineDiagnostics,
+    build_color_pipeline_diagnostics,
+)
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
@@ -292,6 +297,8 @@ class ProjectController(QObject):
         self._background_removal_service: VideoExtractionService | None = None
         self.last_propagation_diagnostics: PropagationDiagnostics | None = None
         self.last_clip_decode_diagnostics: ClipDecodeDiagnostics | None = None
+        self._last_resolved_color_settings: ResolvedColorSettings | None = None
+        self._last_render_color_policy: str | None = None
 
     @property
     def project(self) -> Project | None:
@@ -300,6 +307,71 @@ class ProjectController(QObject):
     @property
     def package_path(self) -> Path | None:
         return self._package_path
+
+    @property
+    def last_resolved_color_settings(self) -> ResolvedColorSettings | None:
+        return self._last_resolved_color_settings
+
+    @property
+    def last_render_color_policy(self) -> str | None:
+        return self._last_render_color_policy
+
+    def record_resolved_color_settings(
+        self,
+        resolved: ResolvedColorSettings | None,
+    ) -> None:
+        """Remember the last Color Settings resolve result (no schema mutation)."""
+        self._last_resolved_color_settings = resolved
+
+    @property
+    def color_pipeline_diagnostics(self) -> ColorPipelineDiagnostics:
+        """Safe Viewer Color Pipeline snapshot (ok with no project / shot)."""
+        try:
+            shot = self.active_shot
+        except Exception:
+            shot = None
+        media_path: str | None = None
+        shot_name: str | None = None
+        if shot is not None:
+            shot_name = getattr(shot, "name", None)
+            media = getattr(shot, "media", None)
+            source = getattr(media, "source_path", None) if media is not None else None
+            if source is not None:
+                media_path = str(source)
+        policy = self._last_render_color_policy
+        if policy is None and shot is not None and self._package_path is not None:
+            policy = self._peek_last_render_color_policy(shot)
+        try:
+            pipeline = self._frame_decoder.pipeline
+        except Exception:
+            pipeline = None
+        return build_color_pipeline_diagnostics(
+            pipeline=pipeline,
+            transform_diagnostics=self.display_transform_diagnostics,
+            transform_identity=(
+                None if pipeline is None else pipeline.transform_identity
+            ),
+            resolved=self._last_resolved_color_settings,
+            media_path=media_path,
+            shot_name=shot_name,
+            last_render_color_policy=policy,
+            active_policy="preview",
+        )
+
+    def _peek_last_render_color_policy(self, shot: Shot) -> str | None:
+        if not shot.smart_layers or self._package_path is None:
+            return None
+        renders = shot.smart_layers[0].renders
+        if not renders:
+            return None
+        try:
+            meta = load_render_color_metadata(self._package_path, renders[-1])
+        except Exception:
+            return None
+        if not meta:
+            return None
+        value = meta.get("color_policy")
+        return str(value) if value is not None else None
 
     @property
     def display_transform_diagnostics(self) -> DisplayTransformDiagnostics | None:
@@ -321,10 +393,6 @@ class ProjectController(QObject):
     ) -> None:
         """Update color transform; keep EXR raw cache, invalidate previews, re-request."""
         self._display_transform = display_transform
-        shot = self.active_shot
-        if shot is None or shot.media.source_path is None:
-            return
-
         reader = self._media_reader
         if hasattr(reader, "display_transform"):
             try:
@@ -332,6 +400,10 @@ class ProjectController(QObject):
             except Exception:
                 pass
         self._frame_decoder.set_display_transform(display_transform)
+
+        shot = self.active_shot
+        if shot is None or shot.media.source_path is None:
+            return
 
         if shot.media.link_state != MediaLinkState.LINKED:
             return
@@ -2405,6 +2477,13 @@ class ProjectController(QObject):
             layer.render_version_counter = previous_counter
             rmtree(final_path, ignore_errors=True)
             return
+        if output.color_policy_metadata:
+            policy_value = output.color_policy_metadata.get("color_policy")
+            self._last_render_color_policy = (
+                str(policy_value) if policy_value is not None else None
+            )
+        else:
+            self._last_render_color_policy = ProcessingColorPolicy.PREVIEW.value
         self.smart_layer_render_ready.emit(render)
 
     @staticmethod
