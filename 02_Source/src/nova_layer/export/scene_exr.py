@@ -1,20 +1,90 @@
 """True Scene Linear EXR compose / write helpers (Phase 10A / 10B).
 
 Separate from uint8-derived ``write_openexr_rgba`` — no 0–1 remapping.
+
+Phase 10B records convenience OpenEXR header attributes. The export
+``manifest.json`` remains authoritative; header failures never block pixel write.
 """
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
-from pathlib import Path
+from dataclasses import dataclass, replace
+from enum import Enum
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+SCENE_EXR_WRITER_VERSION = "10B.1"
+
+# Stable key order for serializer output (tests rely on this).
+_HEADER_KEY_ORDER: tuple[str, ...] = (
+    "software",
+    "framesPerSecond",
+    "nova:colorPolicy",
+    "nova:sceneLinear",
+    "nova:sourceColorSpace",
+    "nova:interpretationColorSpace",
+    "nova:premultiplied",
+    "nova:alphaMode",
+    "nova:pixelEncoding",
+    "nova:sourceRenderVersion",
+    "nova:sourceFingerprint",
+    "nova:projectId",
+    "nova:shotId",
+    "nova:layerId",
+    "nova:frameNumber",
+    "nova:writerVersion",
+)
+
+_ABS_PATH_RE = re.compile(
+    r"^(?:"
+    r"~|"  # home
+    r"/|"  # POSIX abs
+    r"[A-Za-z]:[\\/]|"  # Windows drive
+    r"\\\\"  # UNC
+    r")"
+)
+
 
 class SceneExrError(RuntimeError):
     """Raised when scene-linear EXR compose/write cannot complete."""
+
+
+@dataclass(frozen=True, slots=True)
+class SceneExrHeaderMetadata:
+    """Convenience header fields for Scene Linear EXR (manifest remains authoritative)."""
+
+    color_policy: str
+    scene_linear: bool
+    source_color_space: str | None
+    interpretation_color_space: str | None
+    premultiplied: bool
+    alpha_mode: str
+    pixel_encoding: str
+    source_render_version: int | None
+    source_fingerprint: str | None
+    project_id: str | None
+    shot_id: str | None
+    layer_id: str | None
+    frame_number: int
+    writer_version: str = SCENE_EXR_WRITER_VERSION
+    frames_per_second: float | None = None
+    software: str = "NOVA Layer"
+
+    def with_frame_number(self, frame_number: int) -> SceneExrHeaderMetadata:
+        return replace(self, frame_number=int(frame_number))
+
+
+@dataclass(frozen=True, slots=True)
+class ExrHeaderWriteResult:
+    written_keys: tuple[str, ...] = ()
+    skipped_keys: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def openexr_writer_available() -> bool:
@@ -25,6 +95,127 @@ def openexr_writer_available() -> bool:
     except ImportError:
         return False
     return OpenEXR is not None and Imath is not None
+
+
+def looks_like_filesystem_path(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if _ABS_PATH_RE.match(text):
+        return True
+    if "/" in text or "\\" in text:
+        return True
+    return False
+
+
+def sanitize_header_text(value: str | None) -> str | None:
+    """Return a header-safe text token, or None if the value should be omitted.
+
+    Absolute paths / path-like strings become basename when the basename is a
+    simple token; otherwise they are dropped (never home/abs paths in headers).
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if looks_like_filesystem_path(text):
+        base = PureWindowsPath(text).name if "\\" in text else PurePosixPath(text).name
+        base = base.strip()
+        if not base or base in {".", ".."}:
+            return None
+        # Basename of a path must not still look absolute.
+        if looks_like_filesystem_path(base):
+            return None
+        return base
+    return text
+
+
+def _encode_header_string(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value if value else None
+    if isinstance(value, Enum):
+        return _encode_header_string(value.value)
+    if isinstance(value, Path):
+        sanitized = sanitize_header_text(str(value))
+        return None if sanitized is None else sanitized.encode("utf-8")
+    if isinstance(value, (list, tuple, dict, set)):
+        return None
+    sanitized = sanitize_header_text(str(value))
+    return None if sanitized is None else sanitized.encode("utf-8")
+
+
+def build_openexr_header_attributes(
+    metadata: SceneExrHeaderMetadata,
+) -> dict[str, bytes | int | float]:
+    """Serialize typed metadata to OpenEXR-safe header attribute values.
+
+    Binding contract (OpenEXR 3.4.x): use bytes for strings (Python str may drop
+    silently). Bool → int 0/1. None / NaN / Inf / containers → omit.
+    """
+    raw: dict[str, bytes | int | float | None] = {
+        "software": _encode_header_string(metadata.software),
+        "framesPerSecond": (
+            float(metadata.frames_per_second)
+            if metadata.frames_per_second is not None
+            and math.isfinite(float(metadata.frames_per_second))
+            else None
+        ),
+        "nova:colorPolicy": _encode_header_string(metadata.color_policy),
+        "nova:sceneLinear": 1 if metadata.scene_linear else 0,
+        "nova:sourceColorSpace": _encode_header_string(metadata.source_color_space),
+        "nova:interpretationColorSpace": _encode_header_string(
+            metadata.interpretation_color_space
+        ),
+        "nova:premultiplied": 1 if metadata.premultiplied else 0,
+        "nova:alphaMode": _encode_header_string(metadata.alpha_mode),
+        "nova:pixelEncoding": _encode_header_string(metadata.pixel_encoding),
+        "nova:sourceRenderVersion": (
+            int(metadata.source_render_version)
+            if metadata.source_render_version is not None
+            else None
+        ),
+        "nova:sourceFingerprint": _encode_header_string(metadata.source_fingerprint),
+        "nova:projectId": _encode_header_string(metadata.project_id),
+        "nova:shotId": _encode_header_string(metadata.shot_id),
+        "nova:layerId": _encode_header_string(metadata.layer_id),
+        "nova:frameNumber": int(metadata.frame_number),
+        "nova:writerVersion": _encode_header_string(metadata.writer_version),
+    }
+    ordered: dict[str, bytes | int | float] = {}
+    for key in _HEADER_KEY_ORDER:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        ordered[key] = value
+    return ordered
+
+
+def apply_openexr_header_attributes(
+    header: Any,
+    attributes: Mapping[str, bytes | int | float],
+) -> ExrHeaderWriteResult:
+    """Best-effort assign attributes; never raise for a single failed key."""
+    written: list[str] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    for key, value in attributes.items():
+        try:
+            header[key] = value
+        except Exception as exc:  # noqa: BLE001 — binding-dependent
+            skipped.append(key)
+            warnings.append(f"{key}: {type(exc).__name__}: {exc}")
+            continue
+        written.append(key)
+    return ExrHeaderWriteResult(
+        written_keys=tuple(written),
+        skipped_keys=tuple(skipped),
+        warnings=tuple(warnings),
+    )
 
 
 def compose_scene_rgba(
@@ -69,12 +260,15 @@ def write_scene_openexr_rgba(
     *,
     pixel_type: str = "half",
     compression: str = "zip",
-    metadata: Mapping[str, str] | None = None,
-) -> None:
+    metadata: SceneExrHeaderMetadata | None = None,
+) -> ExrHeaderWriteResult:
     """Write scene-linear float RGBA to OpenEXR (default HALF).
 
     Does **not** remap values into 0–1. Negative and values > 1 are preserved
     within the chosen pixel type's representable range.
+
+    Header metadata is best-effort: attribute failures never block pixel write.
+    Chromaticities / adoptedNeutral are intentionally never written.
     """
     try:
         import Imath  # type: ignore[import-untyped]
@@ -118,9 +312,16 @@ def write_scene_openexr_rgba(
             f"Unsupported scene OpenEXR compression: {compression!r}"
         )
 
-    # Authoritative color/alpha metadata lives in the export manifest.
-    # Avoid unsupported Freeform header keys (binding-dependent).
-    _ = metadata
+    header_result = ExrHeaderWriteResult()
+    if metadata is not None:
+        try:
+            attributes = build_openexr_header_attributes(metadata)
+            header_result = apply_openexr_header_attributes(header, attributes)
+        except Exception as exc:  # noqa: BLE001 — never block pixels for metadata
+            header_result = ExrHeaderWriteResult(
+                skipped_keys=("__all__",),
+                warnings=(f"header metadata build failed: {type(exc).__name__}: {exc}",),
+            )
 
     if pixel_type == "half":
         payload = np.ascontiguousarray(array, dtype=np.float16)
@@ -139,6 +340,7 @@ def write_scene_openexr_rgba(
         )
     finally:
         output.close()
+    return header_result
 
 
 def build_scene_export_manifest_fields(

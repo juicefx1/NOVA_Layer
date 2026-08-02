@@ -143,9 +143,9 @@ def test_scene_export_calls_writer_per_frame(
 
     real_write = scene_exr_mod.write_scene_openexr_rgba
 
-    def _tracked(path: Path, rgba: np.ndarray, **kwargs: object) -> None:
+    def _tracked(path: Path, rgba: np.ndarray, **kwargs: object):
         writes.append(path.name)
-        real_write(path, rgba, **kwargs)
+        return real_write(path, rgba, **kwargs)
 
     monkeypatch.setattr(
         "nova_layer.export.smart_layer.write_scene_openexr_rgba",

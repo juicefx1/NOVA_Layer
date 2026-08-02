@@ -154,7 +154,7 @@ def test_scene_exr_writer_preserves_values(tmp_path: Path) -> None:
     rgba[..., 2] = 0.0
     rgba[..., 3] = 0.5
     path = tmp_path / "scene.exr"
-    write_scene_openexr_rgba(path, rgba, metadata={"novaSceneLinear": "true"})
+    write_scene_openexr_rgba(path, rgba)
     inp = OpenEXR.InputFile(str(path))
     try:
         red = np.frombuffer(

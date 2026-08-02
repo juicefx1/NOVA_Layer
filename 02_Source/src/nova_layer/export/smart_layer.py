@@ -17,7 +17,9 @@ from numpy.typing import NDArray
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.domain.models import SmartLayerRender
 from nova_layer.export.scene_exr import (
+    SCENE_EXR_WRITER_VERSION,
     SceneExrError,
+    SceneExrHeaderMetadata,
     build_scene_export_manifest_fields,
     compose_scene_rgba,
     openexr_writer_available,
@@ -190,6 +192,8 @@ def export_smart_layer_assets(
         exported_files: list[dict[str, Any]] = []
         scene_source_color_space: str | None = None
         scene_source_color_space_source: str | None = None
+        header_skipped: list[str] | None = None
+        header_warnings: list[str] | None = None
         if format is ExportFormat.PNG_SEQUENCE:
             for frame in render.frames:
                 source = package_path / frame.image_reference
@@ -247,6 +251,17 @@ def export_smart_layer_assets(
                 scene_decoder=scene_decoder,
                 mask_loader=mask_loader,
                 input_color_space=input_color_space,
+                media_fingerprint=media_fingerprint,
+                project_id=(
+                    str(project.get("id")) if project.get("id") is not None else None
+                ),
+                shot_id=str(shot.get("id")) if shot.get("id") is not None else None,
+                layer_id=(
+                    str(smart_layer.get("id"))
+                    if smart_layer.get("id") is not None
+                    else None
+                ),
+                frame_rate=frame_rate,
                 should_cancel=should_cancel,
                 report_progress=report_progress,
             )
@@ -254,6 +269,8 @@ def export_smart_layer_assets(
             scene_source_color_space_source = scene_tags.get(
                 "source_color_space_source"
             )
+            header_skipped = scene_tags.get("header_metadata_skipped")
+            header_warnings = scene_tags.get("header_metadata_warnings")
         else:  # pragma: no cover - StrEnum exhaustiveness guard
             raise SmartLayerExportError(f"Unsupported export format: {format}")
 
@@ -287,6 +304,11 @@ def export_smart_layer_assets(
                 config_source=config_source,
             )
             manifest.update(scene_fields)
+            if header_skipped:
+                manifest["header_metadata_skipped"] = header_skipped
+            if header_warnings:
+                manifest["header_metadata_warnings"] = header_warnings
+            manifest["header_writer_version"] = SCENE_EXR_WRITER_VERSION
         else:
             resolved_policy = (
                 dict(color_policy)
@@ -326,14 +348,20 @@ def _export_scene_openexr_sequence(
     scene_decoder: FrameDecodeService | None,
     mask_loader: Callable[[str], NDArray[np.uint8]] | None,
     input_color_space: str | None,
+    media_fingerprint: str | None = None,
+    project_id: str | None = None,
+    shot_id: str | None = None,
+    layer_id: str | None = None,
+    frame_rate: float | None = None,
     should_cancel: Callable[[], bool] | None = None,
     report_progress: Callable[[int, int, str], None] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
-    """Frame-at-a-time True Scene EXR export (Phase 10A-2).
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Frame-at-a-time True Scene EXR export (Phase 10A-2 / 10B header metadata).
 
     Holds at most one ``SceneFrame`` in locals per loop iteration. Does not call
     ``decode_scene_frame_range`` (no full-range dict). Staging cleanup on failure
-    is handled by the caller.
+    is handled by the caller. Header metadata is best-effort convenience; the
+    export manifest remains authoritative.
     """
     _ = package_path  # Scene pixels come from media+mask, not packaged render PNGs.
     if scene_media_path is None or scene_decoder is None or mask_loader is None:
@@ -355,8 +383,10 @@ def _export_scene_openexr_sequence(
 
     source_color_space: str | None = None
     source_color_space_source: str | None = None
-    header_meta: dict[str, str] | None = None
+    header_template: SceneExrHeaderMetadata | None = None
     exported_files: list[dict[str, Any]] = []
+    skipped_keys: set[str] = set()
+    warning_messages: list[str] = []
 
     report(0, total, "Exporting scene-linear OpenEXR sequence")
     for index, frame in enumerate(render.frames, start=1):
@@ -379,22 +409,36 @@ def _export_scene_openexr_sequence(
                 f"{frame.frame_number}: {exc}"
             ) from exc
 
-        if source_color_space is None:
+        if header_template is None:
             source_color_space = scene.color_space
             source_color_space_source = scene.color_space_source
-            source_tag_for_header = (
+            source_tag = (
                 str(source_color_space).strip()
                 if source_color_space is not None and str(source_color_space).strip()
                 else "unspecified"
             )
-            header_meta = {
-                "novaColorPolicy": "scene",
-                "novaSceneLinear": "true",
-                "novaAlphaMode": "straight",
-                "novaSourceColorSpace": source_tag_for_header,
-                "novaInterpretationColorSpace": str(input_color_space or ""),
-                "novaPixelEncoding": "file_native_scene_half",
-            }
+            interpretation = (
+                str(input_color_space).strip()
+                if input_color_space is not None and str(input_color_space).strip()
+                else None
+            )
+            header_template = SceneExrHeaderMetadata(
+                color_policy="scene",
+                scene_linear=True,
+                source_color_space=source_tag,
+                interpretation_color_space=interpretation,
+                premultiplied=False,
+                alpha_mode="straight",
+                pixel_encoding="file_native_scene_half",
+                source_render_version=int(render.version),
+                source_fingerprint=media_fingerprint,
+                project_id=project_id,
+                shot_id=shot_id,
+                layer_id=layer_id,
+                frame_number=int(frame.frame_number),
+                writer_version=SCENE_EXR_WRITER_VERSION,
+                frames_per_second=float(frame_rate) if frame_rate is not None else None,
+            )
 
         if not frame.mask_reference:
             raise SmartLayerExportError(
@@ -413,17 +457,22 @@ def _export_scene_openexr_sequence(
         # Drop scene reference before next decode so only RGBA + mask live briefly.
         del scene
         destination = staging_path / f"frame_{frame.frame_number:06d}.exr"
+        assert header_template is not None
+        frame_metadata = header_template.with_frame_number(frame.frame_number)
         try:
-            write_scene_openexr_rgba(
+            header_result = write_scene_openexr_rgba(
                 destination,
                 rgba,
                 pixel_type="half",
                 compression="zip",
-                metadata=header_meta,
+                metadata=frame_metadata,
             )
         except SceneExrError as exc:
             raise SmartLayerExportError(str(exc)) from exc
         del rgba
+        if header_result is not None:
+            skipped_keys.update(header_result.skipped_keys)
+            warning_messages.extend(header_result.warnings)
         exported_files.append(
             {
                 "name": destination.name,
@@ -433,10 +482,23 @@ def _export_scene_openexr_sequence(
         )
         report(index, total, f"Scene export frame {frame.frame_number} done")
 
-    return exported_files, {
+    tags: dict[str, Any] = {
         "source_color_space": source_color_space,
         "source_color_space_source": source_color_space_source,
     }
+    if skipped_keys:
+        tags["header_metadata_skipped"] = sorted(skipped_keys)
+    if warning_messages:
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique_warnings: list[str] = []
+        for message in warning_messages:
+            if message in seen:
+                continue
+            seen.add(message)
+            unique_warnings.append(message)
+        tags["header_metadata_warnings"] = unique_warnings
+    return exported_files, tags
 
 
 def _load_sidecar_color_policy(
