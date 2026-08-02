@@ -20,6 +20,10 @@ class MediaInfo:
     pixel_format: str | None
 
 
+class MediaReadError(RuntimeError):
+    pass
+
+
 class MediaReader(Protocol):
     def inspect(self, path: Path) -> MediaInfo: ...
 

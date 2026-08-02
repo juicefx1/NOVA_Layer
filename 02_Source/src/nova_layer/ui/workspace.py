@@ -336,24 +336,76 @@ class WorkspaceWindow(QMainWindow):
         return panel
 
     def _request_import(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Media",
-            filter="Video Files (*.mov *.mp4 *.m4v *.avi *.mkv);;All Files (*)",
+        choice = QMessageBox(self)
+        choice.setWindowTitle("Import Media")
+        choice.setText("Choose the media type to import.")
+        video_button = choice.addButton("Video File…", QMessageBox.ButtonRole.AcceptRole)
+        sequence_button = choice.addButton(
+            "Image Sequence Folder…",
+            QMessageBox.ButtonRole.ActionRole,
         )
-        if path:
-            self.statusBar().showMessage("Inspecting media…")
-            self.controller.import_media(Path(path))
+        choice.addButton(QMessageBox.StandardButton.Cancel)
+        choice.exec()
+        clicked = choice.clickedButton()
+
+        if clicked == video_button:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Media",
+                filter="Video Files (*.mov *.mp4 *.m4v *.avi *.mkv);;All Files (*)",
+            )
+            if not path:
+                return
+            media_path = Path(path)
+        elif clicked == sequence_button:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Import Image Sequence",
+                options=QFileDialog.Option.ShowDirsOnly,
+            )
+            if not directory:
+                return
+            media_path = Path(directory)
+        else:
+            return
+
+        self.statusBar().showMessage("Inspecting media…")
+        self.controller.import_media(media_path)
 
     def _request_relink(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Relink Source Media",
-            filter="Video Files (*.mov *.mp4 *.m4v *.avi *.mkv);;All Files (*)",
+        choice = QMessageBox(self)
+        choice.setWindowTitle("Relink Source Media")
+        choice.setText("Choose the media type to relink.")
+        video_button = choice.addButton("Video File…", QMessageBox.ButtonRole.AcceptRole)
+        sequence_button = choice.addButton(
+            "Image Sequence Folder…",
+            QMessageBox.ButtonRole.ActionRole,
         )
-        if not path:
+        choice.addButton(QMessageBox.StandardButton.Cancel)
+        choice.exec()
+        clicked = choice.clickedButton()
+
+        if clicked == video_button:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Relink Source Media",
+                filter="Video Files (*.mov *.mp4 *.m4v *.avi *.mkv);;All Files (*)",
+            )
+            if not path:
+                return
+            replacement = Path(path)
+        elif clicked == sequence_button:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Relink Image Sequence",
+                options=QFileDialog.Option.ShowDirsOnly,
+            )
+            if not directory:
+                return
+            replacement = Path(directory)
+        else:
             return
-        replacement = Path(path)
+
         if self.controller.relink_media(replacement):
             return
         shot = self.controller.active_shot

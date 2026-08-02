@@ -8,11 +8,9 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
-from nova_layer.ports.media import MediaInfo
+from nova_layer.ports.media import MediaInfo, MediaReadError
 
-
-class MediaReadError(RuntimeError):
-    pass
+__all__ = ["MediaReadError", "PyAvMediaReader", "media_fingerprint"]
 
 
 def media_fingerprint(path: Path, sample_size: int = 1024 * 1024) -> str:

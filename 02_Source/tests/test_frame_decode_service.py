@@ -21,7 +21,7 @@ class CountingReader:
 
 def test_frame_decoder_uses_lru_cache(qtbot: object, tmp_path: Path) -> None:
     reader = CountingReader()
-    service = FrameDecodeService(reader, cache_size=2)
+    service = FrameDecodeService(reader, cache_size=2, prefetch_count=0)
     media = tmp_path / "source.mov"
 
     with qtbot.waitSignal(service.frame_ready):  # type: ignore[attr-defined]
@@ -35,7 +35,7 @@ def test_frame_decoder_uses_lru_cache(qtbot: object, tmp_path: Path) -> None:
 
 def test_lru_cache_is_bounded(qtbot: object, tmp_path: Path) -> None:
     reader = CountingReader()
-    service = FrameDecodeService(reader, cache_size=2)
+    service = FrameDecodeService(reader, cache_size=2, prefetch_count=0)
     media = tmp_path / "source.mov"
 
     for frame_number in (1, 2, 3):

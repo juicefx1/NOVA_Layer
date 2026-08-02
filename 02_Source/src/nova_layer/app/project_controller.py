@@ -21,7 +21,8 @@ from nova_layer.adapters.capabilities.mock import (
     MockSkeletonDetectionCapability,
     MockSkeletonTrackingCapability,
 )
-from nova_layer.adapters.media.pyav_reader import MediaReadError, PyAvMediaReader
+from nova_layer.adapters.media.media_reader_factory import MediaReaderFactory
+from nova_layer.adapters.media.pyav_reader import PyAvMediaReader
 from nova_layer.adapters.persistence.json_store import JsonProjectStore, ProjectStoreError
 from nova_layer.adapters.persistence.mask_store import MaskStoreError, PngMaskStore
 from nova_layer.adapters.persistence.preview_store import PngPreviewStore, PreviewStoreError
@@ -83,7 +84,7 @@ from nova_layer.ports.capabilities import (
     TemporalPropagationCapability,
     VideoFrame,
 )
-from nova_layer.ports.media import MediaReader
+from nova_layer.ports.media import MediaReadError, MediaReader
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,10 +310,18 @@ class ProjectController(QObject):
             return self._project.sequences[0].shots[0]
         return None
 
+    def _set_media_reader(self, path: Path) -> None:
+        self._media_reader = MediaReaderFactory.create(path)
+        self._frame_decoder = FrameDecodeService(self._media_reader)
+        self._frame_decoder.frame_ready.connect(self.frame_ready)
+        self._frame_decoder.error_occurred.connect(self.error_occurred)
+
     def import_media(self, media_path: Path) -> Shot | None:
         if self._project is None or self._package_path is None:
             self.error_occurred.emit("Create or open a project before importing media.")
             return None
+        self._set_media_reader(media_path)
+
         try:
             info = self._media_reader.inspect(media_path)
         except (MediaReadError, OSError, ValueError) as exc:
@@ -350,11 +359,14 @@ class ProjectController(QObject):
         if shot is None or shot.media.source_path is None:
             return None
         source = Path(shot.media.source_path)
-        if not source.is_file():
+        if not source.exists():
             return self._set_media_link_state(
                 MediaLinkState.MISSING,
                 "Source media is missing. Relink is required.",
             )
+
+        self._set_media_reader(source)
+
         try:
             info = self._media_reader.inspect(source)
         except (MediaReadError, OSError, ValueError) as exc:
@@ -371,6 +383,8 @@ class ProjectController(QObject):
         if shot is None:
             self.error_occurred.emit("No Shot is available for relinking.")
             return False
+        self._set_media_reader(media_path)
+
         try:
             info = self._media_reader.inspect(media_path)
         except (MediaReadError, OSError, ValueError) as exc:
