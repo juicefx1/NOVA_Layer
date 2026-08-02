@@ -51,9 +51,9 @@ def test_apply_persists_color_settings(
     qtbot.addWidget(dialog)  # type: ignore[attr-defined]
     dialog.backend_combo.setCurrentText("OCIO")
     dialog.config_path_edit.setText(str(tmp_path / "cfg.ocio"))
-    dialog.input_color_space_edit.setText("ACES - ACEScg")
-    dialog.display_edit.setText("sRGB")
-    dialog.view_edit.setText("ACES 1.0 - SDR Video")
+    dialog.input_color_space_combo.setEditText("ACES - ACEScg")
+    dialog.display_combo.setEditText("sRGB")
+    dialog.view_combo.setEditText("ACES 1.0 - SDR Video")
     dialog.exposure_spin.setValue(1.25)
     assert dialog.apply_settings() is True
 

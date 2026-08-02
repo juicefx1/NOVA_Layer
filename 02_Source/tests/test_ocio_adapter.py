@@ -13,6 +13,7 @@ from nova_layer.adapters.color.display_transform import (
 from nova_layer.adapters.color.ocio_adapter import (
     OcioDisplayTransform,
     is_ocio_available,
+    load_ocio_config_options,
     resolve_ocio_config_path,
 )
 
@@ -231,3 +232,79 @@ def test_ocio_uses_env_config(
     transform = OcioDisplayTransform()
     assert transform.diagnostics.config_source == "env"
     assert Path(transform.diagnostics.config_path or "") == minimal_ocio_config.resolve()
+
+
+MULTI_DISPLAY_OCIO_CONFIG = """ocio_profile_version: 2
+
+environment:
+  {}
+
+search_path: ""
+
+roles:
+  default: Raw
+  scene_linear: Raw
+  data: Raw
+
+file_rules:
+  - !<Rule> {name: Default, colorspace: default}
+
+displays:
+  sRGB:
+    - !<View> {name: Raw, colorspace: Raw}
+    - !<View> {name: Linear, colorspace: LinearCS}
+  Rec709:
+    - !<View> {name: Film, colorspace: LinearCS}
+
+active_displays: [sRGB, Rec709]
+active_views: [Raw, Linear, Film]
+
+colorspaces:
+  - !<ColorSpace>
+    name: Raw
+    family: ""
+    equalitygroup: ""
+    bitdepth: 32f
+    isdata: false
+    allocation: uniform
+  - !<ColorSpace>
+    name: LinearCS
+    family: ""
+    equalitygroup: ""
+    bitdepth: 32f
+    isdata: false
+    allocation: uniform
+"""
+
+
+def test_load_ocio_config_options_requires_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nova_layer.adapters.color.ocio_adapter.OCIO", None)
+    with pytest.raises(ColorTransformError, match="PyOpenColorIO is not installed"):
+        load_ocio_config_options()
+
+
+def test_load_ocio_config_options_missing_path(tmp_path: Path) -> None:
+    if not is_ocio_available():
+        with pytest.raises(ColorTransformError):
+            load_ocio_config_options(tmp_path / "nope.ocio")
+        return
+    with pytest.raises(ColorTransformError, match="not found"):
+        load_ocio_config_options(tmp_path / "nope.ocio")
+
+
+@pytest.mark.skipif(not is_ocio_available(), reason="PyOpenColorIO not installed")
+def test_load_ocio_config_options_enumerates(tmp_path: Path) -> None:
+    pytest.importorskip("PyOpenColorIO")
+    path = tmp_path / "multi.ocio"
+    path.write_text(MULTI_DISPLAY_OCIO_CONFIG, encoding="utf-8")
+    options = load_ocio_config_options(path)
+    assert options.config_source == "explicit"
+    assert Path(options.config_path) == path.resolve()
+    assert "Raw" in options.color_spaces
+    assert "scene_linear" in options.color_spaces
+    assert options.displays == ("sRGB", "Rec709") or set(options.displays) >= {"sRGB", "Rec709"}
+    assert "Raw" in options.views_for("sRGB")
+    assert "Linear" in options.views_for("sRGB")
+    assert options.views_for("Rec709") == ("Film",) or "Film" in options.views_for("Rec709")
+    assert options.default_display == "sRGB"
+    assert options.default_view == "Raw"

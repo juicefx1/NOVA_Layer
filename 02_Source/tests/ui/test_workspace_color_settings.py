@@ -73,7 +73,7 @@ def test_ocio_apply_falls_back_with_warning(
     dialog.backend_combo.setCurrentText("OCIO")
     missing = tmp_path / "missing.ocio"
     dialog.config_path_edit.setText(str(missing))
-    dialog.input_color_space_edit.setText("scene_linear")
+    dialog.input_color_space_combo.setEditText("scene_linear")
     dialog.exposure_spin.setValue(1.5)
 
     assert dialog.apply_settings() is True

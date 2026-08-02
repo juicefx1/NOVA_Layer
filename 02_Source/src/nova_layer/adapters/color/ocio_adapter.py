@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,99 @@ def resolve_ocio_config_path(
 
     raise ColorTransformError(
         "No OCIO config available: pass config_path or set the OCIO environment variable"
+    )
+
+
+@dataclass(frozen=True)
+class OcioConfigOptions:
+    """Read-only enumeration of choosable OCIO config entries for Color Settings UI."""
+
+    color_spaces: tuple[str, ...]
+    displays: tuple[str, ...]
+    views_by_display: dict[str, tuple[str, ...]]
+    default_display: str | None
+    default_view: str | None
+    config_path: str
+    config_source: str
+
+    def views_for(self, display: str | None) -> tuple[str, ...]:
+        if not display:
+            return ()
+        return self.views_by_display.get(display, ())
+
+
+def _color_space_names(config: Any) -> tuple[str, ...]:
+    names: list[str] = []
+    try:
+        names.extend(str(item) for item in config.getColorSpaceNames())
+    except Exception:  # noqa: BLE001
+        count = int(config.getNumColorSpaces())
+        for index in range(count):
+            names.append(str(config.getColorSpaceNameByIndex(index)))
+
+    role_names: list[str] = []
+    try:
+        role_names.extend(str(item) for item in config.getRoleNames())
+    except Exception:  # noqa: BLE001
+        try:
+            role_count = int(config.getNumRoles())
+            for index in range(role_count):
+                role_names.append(str(config.getRoleName(index)))
+        except Exception:  # noqa: BLE001
+            role_names = []
+
+    for role in role_names:
+        if role not in names:
+            names.append(role)
+    return tuple(names)
+
+
+def load_ocio_config_options(
+    config_path: Path | None = None,
+) -> OcioConfigOptions:
+    """Load display/view/color-space options from an OCIO config.
+
+    Uses :func:`resolve_ocio_config_path` (explicit path → ``$OCIO``).
+    """
+    if OCIO is None:
+        raise ColorTransformError(
+            "PyOpenColorIO is not installed; install nova-layer[color] to use OCIO"
+        )
+
+    resolved_path, config_source = resolve_ocio_config_path(config_path)
+    try:
+        config = OCIO.Config.CreateFromFile(str(resolved_path))
+    except Exception as exc:  # noqa: BLE001
+        raise ColorTransformError(
+            f"Failed to load OCIO config: {resolved_path} ({exc})"
+        ) from exc
+
+    displays = tuple(str(item) for item in config.getDisplays())
+    views_by_display = {
+        display: tuple(str(item) for item in config.getViews(display))
+        for display in displays
+    }
+    default_display = str(config.getDefaultDisplay() or "") or None
+    default_view: str | None = None
+    if default_display:
+        default_view = str(config.getDefaultView(default_display) or "") or None
+
+    color_spaces = _color_space_names(config)
+    if not color_spaces:
+        raise ColorTransformError(
+            f"OCIO config has no color spaces: {resolved_path}"
+        )
+    if not displays:
+        raise ColorTransformError(f"OCIO config has no displays: {resolved_path}")
+
+    return OcioConfigOptions(
+        color_spaces=color_spaces,
+        displays=displays,
+        views_by_display=views_by_display,
+        default_display=default_display,
+        default_view=default_view,
+        config_path=str(resolved_path),
+        config_source=config_source,
     )
 
 
