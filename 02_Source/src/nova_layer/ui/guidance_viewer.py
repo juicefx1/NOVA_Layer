@@ -6,8 +6,17 @@ from uuid import UUID
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import QLabel
 
 from nova_layer.domain.models import (
@@ -34,12 +43,15 @@ class GuidanceViewer(QLabel):
     guidance_changed = Signal(object, object, object)
     skeleton_correction_changed = Signal(object)
     skeleton_joint_label_requested = Signal(object, object)
+    pixel_hovered = Signal(int, int)
+    pixel_hover_cleared = Signal()
 
     def __init__(self) -> None:
         super().__init__("Import a video to create the first Shot")
         self.setObjectName("mediaViewer")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(640, 360)
+        self.setMouseTracking(True)
         self._frame: NDArray[np.uint8] | None = None
         self._image: QImage | None = None
         self._mask_overlay: QImage | None = None
@@ -57,6 +69,7 @@ class GuidanceViewer(QLabel):
         self._drag_joint_id: UUID | None = None
         self._drag_point_index: int | None = None
         self._drag_start: QPoint | None = None
+        self._last_hover_pixel: tuple[int, int] | None = None
 
     @property
     def points(self) -> list[GuidancePoint]:
@@ -135,7 +148,49 @@ class GuidanceViewer(QLabel):
             channels * width,
             QImage.Format.Format_RGB888,
         ).copy()
+        self._update_display_rect()
         self.update()
+
+    def widget_to_image_coordinates(
+        self,
+        position: QPointF,
+    ) -> tuple[int, int] | None:
+        """Map widget position to 0-based image pixels, or None if outside.
+
+        Uses KeepAspectRatio fit (letterboxing). Does not clamp — outside the
+        displayed image area returns ``None``.
+        """
+        self._update_display_rect()
+        if self._image is None or self._display_rect.isEmpty():
+            return None
+        left = self._display_rect.left()
+        top = self._display_rect.top()
+        display_w = self._display_rect.width()
+        display_h = self._display_rect.height()
+        if display_w <= 0 or display_h <= 0:
+            return None
+        fx = (position.x() - left) / float(display_w)
+        fy = (position.y() - top) / float(display_h)
+        if fx < 0.0 or fy < 0.0 or fx >= 1.0 or fy >= 1.0:
+            return None
+        image_w = self._image.width()
+        image_h = self._image.height()
+        ix = int(fx * image_w)
+        iy = int(fy * image_h)
+        if ix < 0 or iy < 0 or ix >= image_w or iy >= image_h:
+            return None
+        return ix, iy
+
+    def _update_display_rect(self) -> None:
+        """Recompute letterboxed display rect from current widget / image size."""
+        if self._image is None or self.width() <= 0 or self.height() <= 0:
+            self._display_rect = QRect()
+            return
+        image_size = self._image.size()
+        image_size.scale(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - image_size.width()) // 2
+        y = (self.height() - image_size.height()) // 2
+        self._display_rect = QRect(x, y, image_size.width(), image_size.height())
 
     def set_mask_overlay(self, mask: NDArray[np.uint8] | None) -> None:
         if mask is None:
@@ -199,14 +254,12 @@ class GuidanceViewer(QLabel):
         if self._image is None:
             return
         painter = QPainter(self)
+        self._update_display_rect()
         pixmap = QPixmap.fromImage(self._image).scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
+            self._display_rect.size(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        x = (self.width() - pixmap.width()) // 2
-        y = (self.height() - pixmap.height()) // 2
-        self._display_rect = QRect(x, y, pixmap.width(), pixmap.height())
         painter.drawPixmap(self._display_rect, pixmap)
         if self._mask_overlay is not None:
             overlay = QPixmap.fromImage(self._mask_overlay).scaled(
@@ -216,6 +269,10 @@ class GuidanceViewer(QLabel):
             )
             painter.drawPixmap(self._display_rect, overlay)
         self._paint_guidance(painter)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_display_rect()
 
     def _paint_guidance(self, painter: QPainter) -> None:
         if self._tracked_skeleton is not None:
@@ -364,6 +421,7 @@ class GuidanceViewer(QLabel):
             self._drag_start = event.position().toPoint()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self._emit_pixel_hover(event.position())
         if self._drag_point_index is None:
             return super().mouseMoveEvent(event)
         normalized = self._to_normalized(event.position().toPoint())
@@ -373,6 +431,26 @@ class GuidanceViewer(QLabel):
         point = self._points[self._drag_point_index]
         self._points[self._drag_point_index] = point.model_copy(update={"x": x, "y": y})
         self.update()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._clear_pixel_hover()
+        super().leaveEvent(event)
+
+    def _emit_pixel_hover(self, position: QPointF) -> None:
+        coords = self.widget_to_image_coordinates(position)
+        if coords is None:
+            self._clear_pixel_hover()
+            return
+        if coords == self._last_hover_pixel:
+            return
+        self._last_hover_pixel = coords
+        self.pixel_hovered.emit(coords[0], coords[1])
+
+    def _clear_pixel_hover(self) -> None:
+        if self._last_hover_pixel is None:
+            return
+        self._last_hover_pixel = None
+        self.pixel_hover_cleared.emit()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if self._drag_point_index is not None:

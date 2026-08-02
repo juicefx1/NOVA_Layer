@@ -6,9 +6,10 @@ from uuid import UUID
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -44,10 +45,12 @@ from nova_layer.app.effective_color_settings import (
     apply_effective_color_settings,
 )
 from nova_layer.adapters.color.settings import ResolvedColorSettings
+from nova_layer.app.pixel_inspection import empty_pixel_inspection
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
+from nova_layer.ui.pixel_inspector import PixelInspectorPanel
 from nova_layer.ui.validation_dialog import ValidationDialog
 
 
@@ -73,10 +76,18 @@ class WorkspaceWindow(QMainWindow):
         self._scrub_timer.setSingleShot(True)
         self._scrub_timer.setInterval(45)
         self._scrub_timer.timeout.connect(self._request_pending_frame)
+        self._pixel_hover_xy: tuple[int, int] | None = None
+        self._pixel_inspect_pending: tuple[int, int] | None = None
+        self._pixel_inspect_timer = QTimer(self)
+        self._pixel_inspect_timer.setSingleShot(True)
+        self._pixel_inspect_timer.setInterval(33)
+        self._pixel_inspect_timer.timeout.connect(self._flush_pixel_inspection)
+        self._last_pixel_inspection_key: tuple[str, int, int, int] | None = None
         self.setObjectName("workspaceWindow")
         self.setWindowTitle(f"{project.name} — NOVA Layer")
         self.resize(1280, 820)
         self._build_menus()
+        self._build_pixel_inspector_dock()
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -87,6 +98,7 @@ class WorkspaceWindow(QMainWindow):
         outer.addLayout(self._build_content())
         outer.addWidget(self._build_timeline())
         self.setCentralWidget(root)
+        self._wire_pixel_inspector()
 
         status = QStatusBar()
         status.showMessage("Ready — import media to begin")
@@ -163,6 +175,95 @@ class WorkspaceWindow(QMainWindow):
         )
         self.color_pipeline_diagnostics_action.triggered.connect(
             self._open_color_pipeline_diagnostics
+        )
+        self.pixel_inspector_action = view_menu.addAction("Pixel Inspector")
+        self.pixel_inspector_action.setObjectName("pixelInspectorAction")
+        self.pixel_inspector_action.setCheckable(True)
+        self.pixel_inspector_action.setChecked(False)
+        self.pixel_inspector_action.toggled.connect(self._set_pixel_inspector_visible)
+
+    def _build_pixel_inspector_dock(self) -> None:
+        self.pixel_inspector_panel = PixelInspectorPanel()
+        self.pixel_inspector_dock = QDockWidget("Pixel Inspector", self)
+        self.pixel_inspector_dock.setObjectName("pixelInspectorDock")
+        self.pixel_inspector_dock.setWidget(self.pixel_inspector_panel)
+        self.pixel_inspector_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.pixel_inspector_dock)
+        self.pixel_inspector_dock.hide()
+        self.pixel_inspector_dock.visibilityChanged.connect(
+            self._on_pixel_inspector_visibility_changed
+        )
+
+    def _wire_pixel_inspector(self) -> None:
+        self.viewer.pixel_hovered.connect(self._on_pixel_hovered)
+        self.viewer.pixel_hover_cleared.connect(self._on_pixel_hover_cleared)
+
+    def _set_pixel_inspector_visible(self, visible: bool) -> None:
+        self.pixel_inspector_dock.setVisible(visible)
+        if not visible:
+            self._pixel_inspect_timer.stop()
+            self._pixel_inspect_pending = None
+        elif self._pixel_hover_xy is not None:
+            self._schedule_pixel_inspection(*self._pixel_hover_xy)
+
+    def _on_pixel_inspector_visibility_changed(self, visible: bool) -> None:
+        if self.pixel_inspector_action.isChecked() != visible:
+            self.pixel_inspector_action.blockSignals(True)
+            self.pixel_inspector_action.setChecked(visible)
+            self.pixel_inspector_action.blockSignals(False)
+        if not visible:
+            self._pixel_inspect_timer.stop()
+            self._pixel_inspect_pending = None
+
+    def _on_pixel_hovered(self, x: int, y: int) -> None:
+        self._pixel_hover_xy = (x, y)
+        if not self.pixel_inspector_dock.isVisible():
+            return
+        self._schedule_pixel_inspection(x, y)
+
+    def _on_pixel_hover_cleared(self) -> None:
+        self._pixel_hover_xy = None
+        self._pixel_inspect_pending = None
+        self._pixel_inspect_timer.stop()
+        self._last_pixel_inspection_key = None
+        if self.pixel_inspector_dock.isVisible():
+            self.pixel_inspector_panel.apply_inspection(
+                empty_pixel_inspection(warning="Outside image"),
+                diagnostics=self.controller.color_pipeline_diagnostics,
+            )
+
+    def _schedule_pixel_inspection(self, x: int, y: int) -> None:
+        self._pixel_inspect_pending = (x, y)
+        if not self._pixel_inspect_timer.isActive():
+            self._pixel_inspect_timer.start()
+
+    def _flush_pixel_inspection(self) -> None:
+        if not self.pixel_inspector_dock.isVisible():
+            return
+        pending = self._pixel_inspect_pending
+        if pending is None:
+            return
+        self._refresh_pixel_inspection(pending[0], pending[1])
+
+    def _refresh_pixel_inspection(self, x: int, y: int) -> None:
+        if not self.pixel_inspector_dock.isVisible():
+            return
+        shot = self.controller.active_shot
+        if shot is None or shot.media is None:
+            self.pixel_inspector_panel.clear(status="No media")
+            return
+        media_path = Path(shot.media.source_path)
+        frame_number = self._current_frame
+        key = (str(media_path.resolve()), frame_number, x, y)
+        if key == self._last_pixel_inspection_key:
+            return
+        inspection = self.controller.inspect_pixel(media_path, frame_number, x, y)
+        self._last_pixel_inspection_key = key
+        self.pixel_inspector_panel.apply_inspection(
+            inspection,
+            diagnostics=self.controller.color_pipeline_diagnostics,
         )
 
     def _open_color_settings(self) -> None:
@@ -591,6 +692,12 @@ class WorkspaceWindow(QMainWindow):
         )
         self.remove_pose_button.setVisible(has_correction)
         self.frame_label.setText(f"Frame {frame_number}")
+        self._last_pixel_inspection_key = None
+        if (
+            self.pixel_inspector_dock.isVisible()
+            and self._pixel_hover_xy is not None
+        ):
+            self._schedule_pixel_inspection(*self._pixel_hover_xy)
 
     def _timeline_changed(self, frame_number: int) -> None:
         self._discard_skeleton_correction()

@@ -216,6 +216,14 @@ class PreviewFrameCache:
         with self._lock:
             return key in self._items
 
+    def peek(self, key: PreviewKey) -> NDArray[np.uint8] | None:
+        """Return a copy if present without updating hit/miss or LRU order."""
+        with self._lock:
+            cached = self._items.get(key)
+            if cached is None:
+                return None
+            return np.ascontiguousarray(cached).copy()
+
     def get(self, key: PreviewKey) -> NDArray[np.uint8] | None:
         with self._lock:
             cached = self._items.get(key)
@@ -975,6 +983,15 @@ class PreviewPipeline:
         key: PreviewKey = (_resolve_path(path), frame_number, self._transform_id)
         return self._preview_cache.get(key)
 
+    def peek_preview(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8] | None:
+        """Cached PREVIEW without hit/miss/LRU mutation."""
+        key: PreviewKey = (_resolve_path(path), frame_number, self._transform_id)
+        return self._preview_cache.peek(key)
+
     def get_source(
         self,
         path: Path,
@@ -987,6 +1004,27 @@ class PreviewPipeline:
             SOURCE_TRANSFORM_IDENTITY,
         )
         return self._source_cache.get(key)
+
+    def peek_source(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8] | None:
+        """Cached SOURCE v1 without hit/miss/LRU mutation."""
+        key: PreviewKey = (
+            _resolve_path(path),
+            frame_number,
+            SOURCE_TRANSFORM_IDENTITY,
+        )
+        return self._source_cache.peek(key)
+
+    def peek_scene(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> SceneFrame | None:
+        """Cached SceneFrame without hit/miss/LRU mutation."""
+        return self._raw_cache.peek(_resolve_path(path), frame_number)
 
     def prefetch_raw(
         self,

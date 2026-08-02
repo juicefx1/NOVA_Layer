@@ -44,6 +44,7 @@ from nova_layer.app.color_pipeline_diagnostics import (
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
+from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
 from nova_layer.app.preview_extraction import compose_rgba
 from nova_layer.app.processing_frames import (
     SOURCE_TRANSFORM_VERSION,
@@ -389,6 +390,25 @@ class ProjectController(QObject):
             working_cache_stats=(
                 None if pipeline is None else pipeline.working_cache_stats
             ),
+        )
+
+    def inspect_pixel(
+        self,
+        path: Path,
+        frame_number: int,
+        x: int,
+        y: int,
+        *,
+        allow_decode: bool = True,
+    ) -> PixelInspection:
+        """Thin wrapper: PREVIEW / SOURCE / SCENE sample at image coordinates."""
+        return inspect_pixel(
+            self._frame_decoder,
+            path,
+            frame_number,
+            x,
+            y,
+            allow_decode=allow_decode,
         )
 
     def _peek_last_render_color_policy(self, shot: Shot) -> str | None:

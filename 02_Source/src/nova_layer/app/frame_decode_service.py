@@ -13,6 +13,7 @@ from nova_layer.adapters.color.display_transform import (
 )
 from nova_layer.app.color_pipeline_diagnostics import ColorPipelineDiagnostics
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
+from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
 from nova_layer.app.preview_pipeline import (
     DEFAULT_PREVIEW_CACHE_MAX_BYTES,
     DEFAULT_PREVIEW_CACHE_SIZE,
@@ -273,6 +274,25 @@ class FrameDecodeService(QObject):
         """Scene-linear EXR pixels via raw cache (no display transform / exposure)."""
         resolved = path.expanduser().resolve()
         return self._pipeline.get_scene_frame(resolved, frame_number)
+
+    def inspect_pixel(
+        self,
+        path: Path,
+        frame_number: int,
+        x: int,
+        y: int,
+        *,
+        allow_decode: bool = True,
+    ) -> PixelInspection:
+        """Read-only PREVIEW / SOURCE / SCENE sample at ``(x, y)`` (peek-first)."""
+        return inspect_pixel(
+            self,
+            path,
+            frame_number,
+            x,
+            y,
+            allow_decode=allow_decode,
+        )
 
     def get_processing_frame(
         self,
