@@ -156,6 +156,13 @@ Defines use-case preconditions, steps, postconditions, and failure behaviour, in
 **Sole authoritative architecture document** for NOVA Layer Object Workflow
 (layers, ownership, workspace, plugins, automation, batch, persistence).
 
+### COLOR_PIPELINE.md
+
+Authoritative pixel-contract and cache document for Viewer / Processing /
+Propagation / Render color policies (PREVIEW / SOURCE / SCENE), raw/preview/source
+caches, and Smart Layer export color metadata. System-layer architecture stays in
+`ARCHITECTURE.md`; this file locks the Phase 8 color pipeline for regression.
+
 ### 04_PROJECT_STRUCTURE.md
 
 **Superseded** as an architecture specification. Retained as a historical
