@@ -13,6 +13,7 @@ from nova_layer.adapters.color.display_transform import (
 )
 from nova_layer.app.color_pipeline_diagnostics import ColorPipelineDiagnostics
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
+from nova_layer.app.histogram_analysis import FrameHistogram, get_frame_histogram_for_decoder
 from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
 from nova_layer.app.preview_pipeline import (
     DEFAULT_PREVIEW_CACHE_MAX_BYTES,
@@ -291,6 +292,23 @@ class FrameDecodeService(QObject):
             frame_number,
             x,
             y,
+            allow_decode=allow_decode,
+        )
+
+    def get_frame_histogram(
+        self,
+        path: Path,
+        frame_number: int,
+        policy: ProcessingColorPolicy,
+        *,
+        allow_decode: bool = True,
+    ) -> FrameHistogram:
+        """Read-only channel histogram for ``path``/``frame``/``policy`` (peek-first)."""
+        return get_frame_histogram_for_decoder(
+            self,
+            path,
+            frame_number,
+            policy,
             allow_decode=allow_decode,
         )
 

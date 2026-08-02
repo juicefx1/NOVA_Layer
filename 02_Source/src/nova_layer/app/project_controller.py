@@ -42,6 +42,7 @@ from nova_layer.app.color_pipeline_diagnostics import (
     build_color_pipeline_diagnostics,
 )
 from nova_layer.app.frame_decode_service import FrameDecodeService
+from nova_layer.app.histogram_analysis import FrameHistogram, get_frame_histogram_for_decoder
 from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
 from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
@@ -408,6 +409,29 @@ class ProjectController(QObject):
             frame_number,
             x,
             y,
+            allow_decode=allow_decode,
+        )
+
+    def get_frame_histogram(
+        self,
+        *,
+        policy: ProcessingColorPolicy,
+        allow_decode: bool = True,
+    ) -> FrameHistogram | None:
+        """Read-only histogram for the active shot / current preview frame."""
+        shot = self.active_shot
+        if shot is None or shot.media is None or shot.media.source_path is None:
+            return None
+        frame_number = (
+            int(self._preview_frame_number)
+            if self._preview_frame_number is not None
+            else int(shot.master_frame)
+        )
+        return get_frame_histogram_for_decoder(
+            self._frame_decoder,
+            Path(shot.media.source_path),
+            frame_number,
+            policy,
             allow_decode=allow_decode,
         )
 

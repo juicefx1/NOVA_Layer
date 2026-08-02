@@ -49,6 +49,7 @@ from nova_layer.app.pixel_inspection import empty_pixel_inspection
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
+from nova_layer.ui.histogram_panel import HistogramPanel
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
 from nova_layer.ui.pixel_inspector import PixelInspectorPanel
 from nova_layer.ui.validation_dialog import ValidationDialog
@@ -83,11 +84,16 @@ class WorkspaceWindow(QMainWindow):
         self._pixel_inspect_timer.setInterval(33)
         self._pixel_inspect_timer.timeout.connect(self._flush_pixel_inspection)
         self._last_pixel_inspection_key: tuple[str, int, int, int] | None = None
+        self._histogram_refresh_timer = QTimer(self)
+        self._histogram_refresh_timer.setSingleShot(True)
+        self._histogram_refresh_timer.setInterval(150)
+        self._histogram_refresh_timer.timeout.connect(self._flush_histogram_refresh)
         self.setObjectName("workspaceWindow")
         self.setWindowTitle(f"{project.name} — NOVA Layer")
         self.resize(1280, 820)
         self._build_menus()
         self._build_pixel_inspector_dock()
+        self._build_histogram_dock()
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -99,6 +105,7 @@ class WorkspaceWindow(QMainWindow):
         outer.addWidget(self._build_timeline())
         self.setCentralWidget(root)
         self._wire_pixel_inspector()
+        self._wire_histogram_panel()
 
         status = QStatusBar()
         status.showMessage("Ready — import media to begin")
@@ -147,6 +154,7 @@ class WorkspaceWindow(QMainWindow):
             project_root=self.controller.package_path,
         )
         self._last_color_application = application
+        self._schedule_histogram_refresh()
         return application
 
     @property
@@ -181,6 +189,11 @@ class WorkspaceWindow(QMainWindow):
         self.pixel_inspector_action.setCheckable(True)
         self.pixel_inspector_action.setChecked(False)
         self.pixel_inspector_action.toggled.connect(self._set_pixel_inspector_visible)
+        self.histogram_action = view_menu.addAction("Histogram")
+        self.histogram_action.setObjectName("histogramAction")
+        self.histogram_action.setCheckable(True)
+        self.histogram_action.setChecked(False)
+        self.histogram_action.toggled.connect(self._set_histogram_visible)
 
     def _build_pixel_inspector_dock(self) -> None:
         self.pixel_inspector_panel = PixelInspectorPanel()
@@ -195,6 +208,91 @@ class WorkspaceWindow(QMainWindow):
         self.pixel_inspector_dock.visibilityChanged.connect(
             self._on_pixel_inspector_visibility_changed
         )
+
+    def _build_histogram_dock(self) -> None:
+        self.histogram_panel = HistogramPanel()
+        self.histogram_dock = QDockWidget("Histogram", self)
+        self.histogram_dock.setObjectName("histogramDock")
+        self.histogram_dock.setWidget(self.histogram_panel)
+        self.histogram_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.histogram_dock)
+        self.histogram_dock.hide()
+        self.histogram_dock.visibilityChanged.connect(
+            self._on_histogram_visibility_changed
+        )
+
+    def _wire_histogram_panel(self) -> None:
+        self.histogram_panel.policy_changed.connect(
+            lambda _policy: self._schedule_histogram_refresh(force=True)
+        )
+        self.histogram_panel.channel_mode_changed.connect(
+            lambda _mode: self.histogram_panel.apply_histogram(
+                self.histogram_panel._histogram
+            )
+        )
+        self.histogram_panel.refresh_requested.connect(
+            lambda: self._refresh_histogram(force=True)
+        )
+        self.histogram_panel.auto_refresh_changed.connect(
+            self._on_histogram_auto_refresh_changed
+        )
+
+    def _set_histogram_visible(self, visible: bool) -> None:
+        self.histogram_dock.setVisible(visible)
+        if visible:
+            self._schedule_histogram_refresh(force=True)
+        else:
+            self._histogram_refresh_timer.stop()
+
+    def _on_histogram_visibility_changed(self, visible: bool) -> None:
+        if self.histogram_action.isChecked() != visible:
+            self.histogram_action.blockSignals(True)
+            self.histogram_action.setChecked(visible)
+            self.histogram_action.blockSignals(False)
+        if visible:
+            self._schedule_histogram_refresh(force=True)
+        else:
+            self._histogram_refresh_timer.stop()
+
+    def _on_histogram_auto_refresh_changed(self, enabled: bool) -> None:
+        if enabled and self.histogram_dock.isVisible():
+            self._schedule_histogram_refresh(force=True)
+
+    def _schedule_histogram_refresh(self, *, force: bool = False) -> None:
+        if not getattr(self, "histogram_dock", None):
+            return
+        if not self.histogram_dock.isVisible():
+            return
+        if not force and not self.histogram_panel.auto_refresh:
+            return
+        if force:
+            self._histogram_refresh_timer.start(0)
+        elif not self._histogram_refresh_timer.isActive():
+            self._histogram_refresh_timer.start()
+
+    def _flush_histogram_refresh(self) -> None:
+        if not self.histogram_dock.isVisible():
+            return
+        self._refresh_histogram(force=False)
+
+    def _refresh_histogram(self, *, force: bool = False) -> None:
+        if not self.histogram_dock.isVisible():
+            return
+        if not force and not self.histogram_panel.auto_refresh:
+            return
+        shot = self.controller.active_shot
+        if shot is None or shot.media is None:
+            self.histogram_panel.clear(status="No media")
+            return
+        histogram = self.controller.get_frame_histogram(
+            policy=self.histogram_panel.current_policy()
+        )
+        if histogram is None:
+            self.histogram_panel.clear(status="No media")
+            return
+        self.histogram_panel.apply_histogram(histogram)
 
     def _wire_pixel_inspector(self) -> None:
         self.viewer.pixel_hovered.connect(self._on_pixel_hovered)
@@ -698,6 +796,7 @@ class WorkspaceWindow(QMainWindow):
             and self._pixel_hover_xy is not None
         ):
             self._schedule_pixel_inspection(*self._pixel_hover_xy)
+        self._schedule_histogram_refresh()
 
     def _timeline_changed(self, frame_number: int) -> None:
         self._discard_skeleton_correction()
