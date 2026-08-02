@@ -38,18 +38,26 @@ from nova_layer.domain.models import (
     SmartLayerRender,
 )
 from nova_layer.domain.skeleton_presets import openpose_body_25_preset
+from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
+from nova_layer.ui.color_settings_dialog import ColorSettingsDialog, restore_color_settings
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.lifecycle_timeline import LifecycleTimeline
 from nova_layer.ui.validation_dialog import ValidationDialog
 
 
 class WorkspaceWindow(QMainWindow):
-    def __init__(self, controller: ProjectController) -> None:
+    def __init__(
+        self,
+        controller: ProjectController,
+        *,
+        workspace: WorkspaceManager | None = None,
+    ) -> None:
         super().__init__()
         project = controller.project
         if project is None:
             raise ValueError("Workspace requires an active project")
         self.controller = controller
+        self._workspace = workspace or WorkspaceManager.shared()
         self.validation_dialog: ValidationDialog | None = None
         self._pending_frame = 0
         self._current_frame = 0
@@ -61,6 +69,7 @@ class WorkspaceWindow(QMainWindow):
         self.setObjectName("workspaceWindow")
         self.setWindowTitle(f"{project.name} — NOVA Layer")
         self.resize(1280, 820)
+        self._build_menus()
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -75,6 +84,8 @@ class WorkspaceWindow(QMainWindow):
         status = QStatusBar()
         status.showMessage("Ready — import media to begin")
         self.setStatusBar(status)
+
+        self._restore_color_settings()
 
         controller.shot_changed.connect(self.set_shot)
         controller.frame_ready.connect(self.set_frame)
@@ -108,6 +119,23 @@ class WorkspaceWindow(QMainWindow):
         controller.project_migrated.connect(self._project_migrated)
         if controller.active_shot is not None:
             self.set_shot(controller.active_shot)
+
+    def _restore_color_settings(self) -> None:
+        restore_color_settings(self.controller, self._workspace)
+
+    def _build_menus(self) -> None:
+        view_menu = self.menuBar().addMenu("&View")
+        self.color_settings_action = view_menu.addAction("Color Settings…")
+        self.color_settings_action.setObjectName("colorSettingsAction")
+        self.color_settings_action.triggered.connect(self._open_color_settings)
+
+    def _open_color_settings(self) -> None:
+        dialog = ColorSettingsDialog(
+            self.controller,
+            parent=self,
+            workspace=self._workspace,
+        )
+        dialog.exec()
 
     def _build_header(self, project: Project) -> QHBoxLayout:
         layout = QHBoxLayout()

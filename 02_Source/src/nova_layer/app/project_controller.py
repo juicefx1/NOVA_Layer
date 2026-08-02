@@ -21,6 +21,11 @@ from nova_layer.adapters.capabilities.mock import (
     MockSkeletonDetectionCapability,
     MockSkeletonTrackingCapability,
 )
+from nova_layer.adapters.color.display_transform import (
+    DisplayTransformDiagnostics,
+    DisplayTransformProtocol,
+    LegacyDisplayTransform,
+)
 from nova_layer.adapters.media.media_reader_factory import MediaReaderFactory
 from nova_layer.adapters.media.pyav_reader import PyAvMediaReader
 from nova_layer.adapters.persistence.json_store import JsonProjectStore, ProjectStoreError
@@ -248,9 +253,12 @@ class ProjectController(QObject):
         skeleton_detection: SkeletonDetectionCapability | None = None,
         mask_store: PngMaskStore | None = None,
         preview_store: PngPreviewStore | None = None,
+        display_transform: DisplayTransformProtocol | None = None,
     ) -> None:
         super().__init__()
         self._store = store or JsonProjectStore()
+        self._display_transform = display_transform
+        self._preview_frame_number: int | None = None
         self._media_reader = media_reader or PyAvMediaReader()
         self._frame_decoder = FrameDecodeService(self._media_reader)
         self._frame_decoder.frame_ready.connect(self.frame_ready)
@@ -280,6 +288,44 @@ class ProjectController(QObject):
     @property
     def package_path(self) -> Path | None:
         return self._package_path
+
+    @property
+    def display_transform_diagnostics(self) -> DisplayTransformDiagnostics | None:
+        """Effective display-transform diagnostics for the active override.
+
+        Policy:
+        - Injected transform with a ``diagnostics`` attribute → that value.
+        - Injected transform without diagnostics → None.
+        - No override (``None``) → LegacyDisplayTransform defaults (sequence default).
+        """
+        transform = self._display_transform
+        if transform is None:
+            return LegacyDisplayTransform().diagnostics
+        return getattr(transform, "diagnostics", None)
+
+    def set_display_transform(
+        self,
+        display_transform: DisplayTransformProtocol | None,
+    ) -> None:
+        """Update color transform and rebuild the media reader when a shot is active."""
+        self._display_transform = display_transform
+        shot = self.active_shot
+        if shot is None or shot.media.source_path is None:
+            return
+
+        source = Path(shot.media.source_path)
+        self._set_media_reader(source)
+
+        if shot.media.link_state != MediaLinkState.LINKED:
+            return
+
+        frames: list[int] = []
+        if self._preview_frame_number is not None:
+            frames.append(self._preview_frame_number)
+        if shot.master_frame not in frames:
+            frames.append(shot.master_frame)
+        for frame_number in frames:
+            self.request_frame(frame_number)
 
     def create_project(self, name: str, parent_directory: Path) -> Project | None:
         clean_name = name.strip()
@@ -311,7 +357,10 @@ class ProjectController(QObject):
         return None
 
     def _set_media_reader(self, path: Path) -> None:
-        self._media_reader = MediaReaderFactory.create(path)
+        self._media_reader = MediaReaderFactory.create(
+            path,
+            display_transform=self._display_transform,
+        )
         self._frame_decoder = FrameDecodeService(self._media_reader)
         self._frame_decoder.frame_ready.connect(self.frame_ready)
         self._frame_decoder.error_occurred.connect(self.error_occurred)
@@ -463,6 +512,7 @@ class ProjectController(QObject):
         except (OSError, ValueError) as exc:
             self.error_occurred.emit(str(exc))
             return False
+        self._preview_frame_number = frame_number
         return True
 
     def update_artist_guidance(

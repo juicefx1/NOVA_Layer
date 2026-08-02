@@ -9,6 +9,10 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from nova_layer.adapters.color.display_transform import (
+    DisplayTransformProtocol,
+    LegacyDisplayTransform,
+)
 from nova_layer.ports.media import MediaInfo, MediaReadError
 
 
@@ -69,30 +73,6 @@ def sequence_fingerprint(files: list[Path]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _linear_to_srgb(linear: NDArray[np.floating[Any]]) -> NDArray[np.float32]:
-    """IEC 61966-2-1 Approximate Linear → sRGB transfer (preview)."""
-    value = np.asarray(linear, dtype=np.float32)
-    value = np.clip(value, 0.0, None)
-    a = 0.055
-    return np.where(
-        value <= 0.0031308,
-        12.92 * value,
-        (1.0 + a) * np.power(value, 1.0 / 2.4) - a,
-    ).astype(np.float32)
-
-
-def _float_rgb_to_preview_u8(pixels: np.ndarray) -> NDArray[np.uint8]:
-    """Convert float16/float32 RGB(A) linear pixels to preview uint8 sRGB."""
-    array = np.asarray(pixels)
-    if array.ndim != 3:
-        raise MediaReadError(f"EXR pixel array must be HxWxC, got shape {array.shape}")
-    if array.shape[2] < 3:
-        raise MediaReadError(f"EXR must have at least 3 channels, got {array.shape[2]}")
-    rgb = np.asarray(array[:, :, :3], dtype=np.float32)
-    srgb = _linear_to_srgb(rgb)
-    return np.asarray(np.clip(srgb, 0.0, 1.0) * 255.0 + 0.5, dtype=np.uint8)
-
-
 def _read_exr_pillow(path: Path) -> NDArray[np.uint8]:
     try:
         with Image.open(path) as img:
@@ -103,7 +83,11 @@ def _read_exr_pillow(path: Path) -> NDArray[np.uint8]:
         ) from exc
 
 
-def _read_exr_openimageio(path: Path, oiio: Any) -> NDArray[np.uint8]:
+def _read_exr_openimageio(
+    path: Path,
+    oiio: Any,
+    display_transform: DisplayTransformProtocol,
+) -> NDArray[np.uint8]:
     inp = oiio.ImageInput.open(str(path))
     if inp is None:
         raise MediaReadError(f"Could not open EXR: {path}")
@@ -119,21 +103,16 @@ def _read_exr_openimageio(path: Path, oiio: Any) -> NDArray[np.uint8]:
             array = array.reshape(int(spec.height), int(spec.width), channels)
         elif array.ndim == 2:
             array = array.reshape(int(spec.height), int(spec.width), 1)
-        return _float_rgb_to_preview_u8(array)
+        try:
+            return display_transform.apply(array)
+        except (TypeError, ValueError) as exc:
+            raise MediaReadError(f"Could not display-transform EXR: {path} ({exc})") from exc
     except MediaReadError:
         raise
     except Exception as exc:
         raise MediaReadError(f"Could not decode EXR: {path} ({exc})") from exc
     finally:
         inp.close()
-
-
-def _read_exr(path: Path) -> NDArray[np.uint8]:
-    """Decode an OpenEXR frame to preview uint8 RGB (Linear → sRGB when float)."""
-    oiio = _load_openimageio()
-    if oiio is not None:
-        return _read_exr_openimageio(path, oiio)
-    return _read_exr_pillow(path)
 
 
 def _probe_image(path: Path) -> tuple[int, int, str]:
@@ -163,14 +142,18 @@ def _probe_image(path: Path) -> tuple[int, int, str]:
         return int(width), int(height), str(img.mode)
 
 
-def _read_raster(path: Path) -> NDArray[np.uint8]:
-    if path.suffix.lower() == _EXR_SUFFIX:
-        return _read_exr(path)
-    with Image.open(path) as img:
-        return np.asarray(img.convert("RGB"), dtype=np.uint8)
-
-
 class ImageSequenceReader:
+    def __init__(
+        self,
+        display_transform: DisplayTransformProtocol | None = None,
+    ) -> None:
+        # Default remains LegacyDisplayTransform (no automatic OCIO selection).
+        self._display_transform = display_transform or LegacyDisplayTransform()
+
+    @property
+    def display_transform(self) -> DisplayTransformProtocol:
+        return self._display_transform
+
     def inspect(self, path: Path) -> MediaInfo:
         folder = path.expanduser().resolve()
 
@@ -210,4 +193,17 @@ class ImageSequenceReader:
                 f"Frame {frame_number} is outside the sequence."
             )
 
-        return _read_raster(files[frame_number])
+        return self._read_raster(files[frame_number])
+
+    def _read_exr(self, path: Path) -> NDArray[np.uint8]:
+        """Decode an OpenEXR frame to preview uint8 RGB via DisplayTransform when float."""
+        oiio = _load_openimageio()
+        if oiio is not None:
+            return _read_exr_openimageio(path, oiio, self._display_transform)
+        return _read_exr_pillow(path)
+
+    def _read_raster(self, path: Path) -> NDArray[np.uint8]:
+        if path.suffix.lower() == _EXR_SUFFIX:
+            return self._read_exr(path)
+        with Image.open(path) as img:
+            return np.asarray(img.convert("RGB"), dtype=np.uint8)

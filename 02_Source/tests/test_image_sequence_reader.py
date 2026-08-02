@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -95,22 +96,60 @@ def test_inspect_empty_folder_raises(tmp_path: Path) -> None:
         raise AssertionError("expected MediaReadError")
 
 
-def test_float_rgb_to_preview_u8_supports_float16_and_rgba() -> None:
-    from nova_layer.adapters.media.image_sequence_reader import _float_rgb_to_preview_u8
+def test_exr_path_uses_display_transform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nova_layer.adapters.color.display_transform import DisplayTransform
 
-    # Linear mid-gray ~0.18 → sRGB ~118–119
-    rgba = np.zeros((1, 1, 4), dtype=np.float16)
-    rgba[0, 0, :3] = np.float16(0.18)
-    rgba[0, 0, 3] = np.float16(1.0)
-    preview = _float_rgb_to_preview_u8(rgba)
-    assert preview.dtype == np.uint8
-    assert preview.shape == (1, 1, 3)
-    assert 110 <= int(preview[0, 0, 0]) <= 130
-    assert int(preview[0, 0, 1]) == int(preview[0, 0, 0])
+    class RecordingTransform(DisplayTransform):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[Any] = []
 
-    f32 = np.zeros((1, 1, 3), dtype=np.float32)
-    f32[0, 0] = (1.0, 0.0, 0.0)
-    assert tuple(int(v) for v in _float_rgb_to_preview_u8(f32)[0, 0]) == (255, 0, 0)
+        def apply(self, image: np.ndarray) -> np.ndarray:
+            self.calls.append(np.asarray(image).copy())
+            return super().apply(image)
+
+    class FakeSpec:
+        height = 1
+        width = 1
+        nchannels = 3
+
+    class FakeInput:
+        def __init__(self) -> None:
+            self._closed = False
+
+        def spec(self) -> FakeSpec:
+            return FakeSpec()
+
+        def read_image(self, _fmt: object) -> np.ndarray:
+            return np.array([[[0.18, 0.0, 0.0]]], dtype=np.float32)
+
+        def close(self) -> None:
+            self._closed = True
+
+    class FakeOIIO:
+        FLOAT = object()
+
+        class ImageInput:
+            @staticmethod
+            def open(_path: str) -> FakeInput:
+                return FakeInput()
+
+    recording = RecordingTransform()
+    monkeypatch.setattr(
+        "nova_layer.adapters.media.image_sequence_reader._load_openimageio",
+        lambda: FakeOIIO,
+    )
+    # EXR suffix drives OIIO path; file need not be valid EXR bytes.
+    (tmp_path / "frame.exr").write_bytes(b"not-a-real-exr")
+
+    reader = ImageSequenceReader(display_transform=recording)
+    frame = reader.read_frame(tmp_path, 0)
+    assert len(recording.calls) == 1
+    assert recording.calls[0].shape == (1, 1, 3)
+    assert frame.dtype == np.uint8
+    assert frame.shape == (1, 1, 3)
+    assert 110 <= int(frame[0, 0, 0]) <= 130
+    assert int(frame[0, 0, 1]) == 0
 
 
 def test_png_path_unaffected_without_openimageio(tmp_path: Path) -> None:
