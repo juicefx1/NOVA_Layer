@@ -115,6 +115,18 @@ class RawFrameCache:
         with self._lock:
             return key in self._items
 
+    def peek(self, path: Path, frame_number: int) -> SceneFrame | None:
+        """Return a copy if present without updating hit/miss or LRU order.
+
+        Intended for read-only diagnostics snapshots.
+        """
+        key = _cache_key(path, frame_number)
+        with self._lock:
+            frame = self._items.get(key)
+            if frame is None:
+                return None
+            return _copy_scene_frame(frame)
+
     def get(self, path: Path, frame_number: int) -> SceneFrame | None:
         key = _cache_key(path, frame_number)
         with self._lock:

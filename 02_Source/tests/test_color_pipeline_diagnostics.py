@@ -16,21 +16,28 @@ from nova_layer.adapters.color.exposure_transform import ExposureTransform
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.adapters.media.image_sequence_reader import ImageSequenceReader
 from nova_layer.app.color_pipeline_diagnostics import (
+    CacheDiagnostics,
+    ColorSettingProvenance,
     build_color_pipeline_diagnostics,
     bytes_to_mib,
     format_color_pipeline_diagnostics,
+    format_transform_identity,
     hit_rate,
 )
 from nova_layer.app.frame_cache_stats import FrameCacheStats
 from nova_layer.app.frame_decode_service import FrameDecodeService
-from nova_layer.app.preview_pipeline import PreviewPipeline
-from nova_layer.app.processing_frames import ProcessingColorPolicy
+from nova_layer.app.preview_pipeline import PreviewPipeline, TransformIdentity
+from nova_layer.app.processing_frames import (
+    SOURCE_TRANSFORM_VERSION,
+    ProcessingColorPolicy,
+)
 from nova_layer.app.project_controller import ProjectController
 from nova_layer.app.render_color_metadata import (
     build_render_color_metadata,
     write_render_color_metadata,
 )
 from nova_layer.domain.models import ExtractionPreview, SmartLayerRender
+from dataclasses import FrozenInstanceError
 
 
 def _fake_oiio(monkeypatch: pytest.MonkeyPatch, counter: list[int]) -> None:
@@ -313,3 +320,148 @@ def test_pipeline_property_matches_decoder(
     snap = build_color_pipeline_diagnostics(pipeline=pipeline)
     assert isinstance(snap.raw_cache, FrameCacheStats)
     assert snap.preview_hit_rate is None or snap.preview_hit_rate >= 0.0
+    via_api = pipeline.diagnostics_snapshot()
+    assert via_api.raw_cache.count == snap.raw_cache.count
+    assert via_api.transform_identity == snap.transform_identity
+
+
+def test_cache_diagnostics_hit_rate_property() -> None:
+    empty = CacheDiagnostics.from_stats(
+        "raw",
+        FrameCacheStats(0, 0, 1, 1, 0, 0, 0, 0, 0),
+    )
+    assert empty.hit_rate is None
+    filled = CacheDiagnostics.from_stats(
+        "preview",
+        FrameCacheStats(1, 12, 100, 8, 3, 1, 0, 0, 0),
+    )
+    assert filled.hit_rate == pytest.approx(0.75)
+    assert filled.current_mib == pytest.approx(12 / (1024 * 1024))
+
+
+def test_policy_defaults_and_source_version_constant() -> None:
+    snap = build_color_pipeline_diagnostics()
+    assert snap.processing_default_policy == ProcessingColorPolicy.SOURCE.value
+    assert snap.render_default_policy == ProcessingColorPolicy.PREVIEW.value
+    assert snap.source_transform_version == SOURCE_TRANSFORM_VERSION
+    assert snap.source_transform_version == "source_legacy_srgb_v1"
+    assert snap.active_frame is None
+    assert isinstance(snap.provenance, ColorSettingProvenance)
+    assert snap.provenance.backend == "none"
+
+
+def test_provenance_from_resolved() -> None:
+    resolved = ResolvedColorSettings(
+        backend="ocio",
+        config_path="/tmp/a.ocio",
+        config_source="explicit",
+        input_color_space="ACEScg",
+        display="sRGB",
+        view="ACES 1.0",
+        exposure=0.5,
+        source_backend="project",
+        source_config="workspace",
+        source_input_color_space="session",
+        source_display="project",
+        source_view="default",
+        source_exposure="environment",
+        warnings=("note",),
+    )
+    snap = build_color_pipeline_diagnostics(resolved=resolved)
+    assert snap.provenance.backend == "project"
+    assert snap.provenance.config == "workspace"
+    assert snap.provenance.input_color_space == "session"
+    assert snap.resolve_warnings == ("note",)
+
+
+def test_transform_identity_stable_and_display_safe() -> None:
+    identity = TransformIdentity(
+        backend="ocio",
+        config_path=str(Path.home() / "configs" / "studio.ocio"),
+        config_source="explicit",
+        input_color_space="ACEScg",
+        display="sRGB",
+        view="ACES 1.0",
+        exposure=0.0,
+    )
+    full = format_transform_identity(identity)
+    safe = format_transform_identity(identity, display_safe=True)
+    assert full.startswith("backend=ocio|config=")
+    assert "|input=ACEScg|" in full
+    assert full.endswith("|exposure=0") or "|exposure=0|" in full or full.endswith("|exposure=0.0")
+    assert "~/" in safe or safe.startswith("backend=ocio|config=~")
+    assert Path.home().as_posix() not in safe.replace("\\", "/")
+    snap = build_color_pipeline_diagnostics(transform_identity=identity)
+    assert snap.transform_identity == full
+    assert snap.transform_identity_display == safe
+
+
+def test_snapshot_does_not_mutate_cache_hits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter: list[int] = []
+    _fake_oiio(monkeypatch, counter)
+    seq = _exr_seq(tmp_path)
+    pipeline = PreviewPipeline(
+        ImageSequenceReader(),
+        LegacyDisplayTransform(),
+    )
+    pipeline.read_frame(seq, 0)
+    before = pipeline.raw_cache_stats
+    # Warm path so peek can find frame 0 tags.
+    _ = build_color_pipeline_diagnostics(
+        pipeline=pipeline,
+        media_path=seq,
+    )
+    mid = pipeline.raw_cache_stats
+    assert mid.hits == before.hits
+    assert mid.misses == before.misses
+    snap2 = pipeline.diagnostics_snapshot()
+    after = pipeline.raw_cache_stats
+    assert after.hits == before.hits
+    assert after.misses == before.misses
+    assert snap2.raw_cache.hits == before.hits
+
+
+def test_snapshot_immutable() -> None:
+    snap = build_color_pipeline_diagnostics()
+    with pytest.raises(FrozenInstanceError):
+        snap.active_backend = "hacked"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        snap.provenance.backend = "x"  # type: ignore[misc]
+
+
+def test_controller_active_frame_and_format(
+    tmp_path: Path,
+    qapp: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    counter: list[int] = []
+    _fake_oiio(monkeypatch, counter)
+    seq = _exr_seq(tmp_path)
+    root = tmp_path / "proj"
+    root.mkdir()
+    controller = ProjectController()
+    assert controller.create_project("FrameDiag", root) is not None
+    shot = controller.import_media(seq)
+    assert shot is not None
+    controller.request_frame(1)
+    snap = controller.color_pipeline_diagnostics
+    assert snap.active_frame == 1
+    assert snap.processing_default_policy == "source"
+    assert snap.render_default_policy == "preview"
+    text = format_color_pipeline_diagnostics(snap)
+    assert "Processing default: source" in text
+    assert "Render default: preview" in text
+    assert "SOURCE transform version:" in text
+    assert "Active frame: 1" in text
+    assert "Provenance:" in text
+
+
+def test_format_helper_empty_state() -> None:
+    text = format_color_pipeline_diagnostics(build_color_pipeline_diagnostics())
+    assert "NOVA Layer Color Pipeline Diagnostics" in text
+    assert "Active frame: —" in text
+    assert "Raw Cache:" in text

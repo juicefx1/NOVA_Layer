@@ -351,12 +351,19 @@ class ProjectController(QObject):
             shot = None
         media_path: str | None = None
         shot_name: str | None = None
+        active_frame: int | None = None
         if shot is not None:
             shot_name = getattr(shot, "name", None)
             media = getattr(shot, "media", None)
             source = getattr(media, "source_path", None) if media is not None else None
             if source is not None:
                 media_path = str(source)
+            if self._preview_frame_number is not None:
+                active_frame = int(self._preview_frame_number)
+            else:
+                master = getattr(shot, "master_frame", None)
+                if master is not None:
+                    active_frame = int(master)
         policy = self._last_render_color_policy
         if policy is None and shot is not None and self._package_path is not None:
             policy = self._peek_last_render_color_policy(shot)
@@ -373,6 +380,7 @@ class ProjectController(QObject):
             resolved=self._last_resolved_color_settings,
             media_path=media_path,
             shot_name=shot_name,
+            active_frame=active_frame,
             last_render_color_policy=policy,
             active_policy="preview",
             working_settings=(

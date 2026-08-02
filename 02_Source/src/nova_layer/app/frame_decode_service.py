@@ -8,14 +8,10 @@ from numpy.typing import NDArray
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from nova_layer.adapters.color.display_transform import (
-    DisplayTransformDiagnostics,
     DisplayTransformProtocol,
     LegacyDisplayTransform,
 )
-from nova_layer.app.color_pipeline_diagnostics import (
-    ColorPipelineDiagnostics,
-    build_color_pipeline_diagnostics,
-)
+from nova_layer.app.color_pipeline_diagnostics import ColorPipelineDiagnostics
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.preview_pipeline import (
     DEFAULT_PREVIEW_CACHE_MAX_BYTES,
@@ -309,18 +305,7 @@ class FrameDecodeService(QObject):
     @property
     def color_pipeline_diagnostics(self) -> ColorPipelineDiagnostics:
         """Read-only Viewer Color Pipeline snapshot (cache + transform identity)."""
-        transform = self._pipeline.display_transform
-        raw_diag = getattr(transform, "diagnostics", None)
-        transform_diagnostics = (
-            raw_diag if isinstance(raw_diag, DisplayTransformDiagnostics) else None
-        )
-        return build_color_pipeline_diagnostics(
-            pipeline=self._pipeline,
-            transform_diagnostics=transform_diagnostics,
-            transform_identity=self._pipeline.transform_identity,
-            working_settings=self._pipeline.working_space_settings,
-            working_cache_stats=self._pipeline.working_cache_stats,
-        )
+        return self._pipeline.diagnostics_snapshot()
 
     def clear(self) -> None:
         with self._lock:

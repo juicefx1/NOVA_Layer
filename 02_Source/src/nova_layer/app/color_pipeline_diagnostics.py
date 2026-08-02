@@ -1,7 +1,7 @@
-"""Read-only Color Pipeline diagnostics snapshot (Phase 9B / 10B / 10C-1).
+"""Read-only Color Pipeline diagnostics snapshot (Phase 9B-1 / 10B / 10C).
 
-Assembles existing cache / transform / resolve state without duplicating cache
-policy or mutating runtime caches beyond optional raw-cache peek.
+Assembles existing cache / transform / resolve state without decoding, without
+mutating LRU order, and without recording cache hits/misses on peek paths.
 """
 
 from __future__ import annotations
@@ -15,7 +15,10 @@ from nova_layer.adapters.color.display_transform import DisplayTransformDiagnost
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.frame_cache_stats import FrameCacheStats, PreviewPipelineStats
 from nova_layer.app.preview_pipeline import PreviewPipeline, TransformIdentity
-from nova_layer.app.processing_frames import SOURCE_TRANSFORM_VERSION
+from nova_layer.app.processing_frames import (
+    SOURCE_TRANSFORM_VERSION,
+    ProcessingColorPolicy,
+)
 from nova_layer.app.scene_color_space import source_transform_warning as warning_for_source
 from nova_layer.app.working_space import (
     WORKING_CONVERTER_VERSION,
@@ -66,18 +69,120 @@ def format_mib(value: float) -> str:
     return f"{value:.1f}"
 
 
-def format_transform_identity(identity: TransformIdentity | None) -> str:
+def _display_safe_path(path: str | None) -> str | None:
+    """Collapse home-directory prefixes for log/UI-safe identity strings."""
+    if path is None:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    try:
+        home = str(Path.home())
+        if text == home or text.startswith(home + "/") or text.startswith(home + "\\"):
+            return "~" + text[len(home) :]
+    except Exception:
+        pass
+    return text
+
+
+def format_transform_identity(
+    identity: TransformIdentity | None,
+    *,
+    display_safe: bool = False,
+) -> str:
+    """Stable, field-ordered transform identity (not ``repr``)."""
     if identity is None:
         return "—"
+    config = identity.config_path
+    if display_safe:
+        config = _display_safe_path(config)
     return (
-        f"backend={identity.backend}; "
-        f"ics={identity.input_color_space}; "
-        f"display={identity.display or '—'}; "
-        f"view={identity.view or '—'}; "
-        f"exposure={identity.exposure:g}; "
-        f"config={identity.config_path or '—'}; "
-        f"config_source={identity.config_source or '—'}"
+        f"backend={identity.backend}"
+        f"|config={config or '—'}"
+        f"|config_source={identity.config_source or '—'}"
+        f"|input={identity.input_color_space}"
+        f"|display={identity.display or '—'}"
+        f"|view={identity.view or '—'}"
+        f"|exposure={identity.exposure:g}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CacheDiagnostics:
+    """Named cache slice for diagnostics (hit_rate is derived, not stored)."""
+
+    name: str
+    count: int
+    current_bytes: int
+    max_bytes: int
+    max_entries: int | None
+    hits: int
+    misses: int
+    evictions: int
+    oversized_rejections: int
+    oversized_admissions: int
+
+    @classmethod
+    def from_stats(cls, name: str, stats: FrameCacheStats) -> CacheDiagnostics:
+        return cls(
+            name=str(name),
+            count=int(stats.count),
+            current_bytes=int(stats.current_bytes),
+            max_bytes=int(stats.max_bytes),
+            max_entries=stats.max_entries,
+            hits=int(stats.hits),
+            misses=int(stats.misses),
+            evictions=int(stats.evictions),
+            oversized_rejections=int(stats.oversized_rejections),
+            oversized_admissions=int(stats.oversized_admissions),
+        )
+
+    @property
+    def hit_rate(self) -> float | None:
+        return hit_rate(self.hits, self.misses)
+
+    @property
+    def current_mib(self) -> float:
+        return bytes_to_mib(self.current_bytes)
+
+    @property
+    def max_mib(self) -> float:
+        return bytes_to_mib(self.max_bytes)
+
+    def to_frame_cache_stats(self) -> FrameCacheStats:
+        return FrameCacheStats(
+            count=self.count,
+            current_bytes=self.current_bytes,
+            max_bytes=self.max_bytes,
+            max_entries=self.max_entries,
+            hits=self.hits,
+            misses=self.misses,
+            evictions=self.evictions,
+            oversized_rejections=self.oversized_rejections,
+            oversized_admissions=self.oversized_admissions,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ColorSettingProvenance:
+    """Immutable resolve provenance for Color Settings layers."""
+
+    backend: str
+    config: str
+    input_color_space: str
+    display: str
+    view: str
+    exposure: str
+
+
+_EMPTY_PROVENANCE = ColorSettingProvenance(
+    backend="none",
+    config="none",
+    input_color_space="none",
+    display="none",
+    view="none",
+    exposure="none",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +225,30 @@ class ColorPipelineDiagnostics:
     last_render_color_policy: str | None
     warnings: tuple[str, ...]
 
+    # Phase 9B-1 — explicit policy / frame / provenance / named cache views.
+    active_frame: int | None = None
+    processing_default_policy: str = ProcessingColorPolicy.SOURCE.value
+    render_default_policy: str = ProcessingColorPolicy.PREVIEW.value
+    source_transform_version: str = SOURCE_TRANSFORM_VERSION
+    provenance: ColorSettingProvenance = field(default=_EMPTY_PROVENANCE)
+    transform_identity_display: str = "—"
+    raw_cache_diag: CacheDiagnostics = field(
+        default_factory=lambda: CacheDiagnostics.from_stats("raw", _EMPTY_CACHE)
+    )
+    preview_cache_diag: CacheDiagnostics = field(
+        default_factory=lambda: CacheDiagnostics.from_stats("preview", _EMPTY_CACHE)
+    )
+    source_cache_diag: CacheDiagnostics = field(
+        default_factory=lambda: CacheDiagnostics.from_stats("source", _EMPTY_CACHE)
+    )
+    resolve_warnings: tuple[str, ...] = ()
+
+    # Optional lightweight render sidecar fields (memory/existing peek only).
+    last_render_alpha_mode: str | None = None
+    last_render_premultiplied: bool | None = None
+    last_render_scene_linear: bool | None = None
+    last_render_pixel_encoding: str | None = None
+
     # Phase 10B — SceneFrame tag / SOURCE risk (None when no cached scene frame).
     active_source_color_space: str | None = None
     source_color_space_source: str | None = None
@@ -152,18 +281,36 @@ def empty_frame_cache_stats() -> FrameCacheStats:
     return _EMPTY_CACHE
 
 
+def provenance_from_resolved(
+    resolved: ResolvedColorSettings | None,
+) -> ColorSettingProvenance:
+    if resolved is None:
+        return _EMPTY_PROVENANCE
+    return ColorSettingProvenance(
+        backend=str(resolved.source_backend),
+        config=str(resolved.source_config),
+        input_color_space=str(resolved.source_input_color_space),
+        display=str(resolved.source_display),
+        view=str(resolved.source_view),
+        exposure=str(resolved.source_exposure),
+    )
+
+
 def _peek_cached_scene_tags(
     pipeline: PreviewPipeline | None,
     media_path: str | Path | None,
 ) -> tuple[str | None, str | None, str | None]:
-    """Return (color_space, color_space_source, warning) if frame 0 is already cached."""
+    """Return (color_space, color_space_source, warning) if frame 0 is cached.
+
+    Uses :meth:`RawFrameCache.peek` so diagnostics never bump hits or LRU.
+    """
     if pipeline is None or media_path is None:
         return None, None, None
     try:
         path = Path(media_path)
         if not pipeline.raw_cache.contains(path, 0):
             return None, None, None
-        frame = pipeline.raw_cache.get(path, 0)
+        frame = pipeline.raw_cache.peek(path, 0)
         if frame is None:
             return None, None, None
         warn = warning_for_source(frame.color_space)
@@ -180,7 +327,12 @@ def build_color_pipeline_diagnostics(
     resolved: ResolvedColorSettings | None = None,
     media_path: str | Path | None = None,
     shot_name: str | None = None,
+    active_frame: int | None = None,
     last_render_color_policy: str | None = None,
+    last_render_alpha_mode: str | None = None,
+    last_render_premultiplied: bool | None = None,
+    last_render_scene_linear: bool | None = None,
+    last_render_pixel_encoding: str | None = None,
     extra_warnings: Sequence[str] = (),
     active_policy: str | None = "preview",
     working_settings: WorkingSpaceSettings | None = None,
@@ -197,9 +349,11 @@ def build_color_pipeline_diagnostics(
         else (pipeline.transform_identity if pipeline is not None else None)
     )
 
+    resolve_warnings: list[str] = []
     warnings: list[str] = []
     if resolved is not None:
-        warnings.extend(str(item) for item in resolved.warnings)
+        resolve_warnings.extend(str(item) for item in resolved.warnings)
+        warnings.extend(resolve_warnings)
     if transform_diagnostics is not None and transform_diagnostics.fallback_reason:
         warnings.append(f"fallback: {transform_diagnostics.fallback_reason}")
     for item in extra_warnings:
@@ -321,10 +475,18 @@ def build_color_pipeline_diagnostics(
     else:
         interpretation = input_cs
 
+    raw_diag = CacheDiagnostics.from_stats("raw", raw)
+    preview_diag = CacheDiagnostics.from_stats("preview", preview)
+    source_diag = CacheDiagnostics.from_stats("source", source)
+    provenance = provenance_from_resolved(resolved)
+
     return ColorPipelineDiagnostics(
         active_backend=backend,
         active_policy=active_policy,
         transform_identity=format_transform_identity(identity),
+        transform_identity_display=format_transform_identity(
+            identity, display_safe=True
+        ),
         input_color_space=input_cs,
         display=display,
         view=view,
@@ -334,22 +496,35 @@ def build_color_pipeline_diagnostics(
         fallback_reason=fallback,
         media_path=media_text,
         shot_name=shot_name,
+        active_frame=active_frame,
+        processing_default_policy=ProcessingColorPolicy.SOURCE.value,
+        render_default_policy=ProcessingColorPolicy.PREVIEW.value,
+        source_transform_version=SOURCE_TRANSFORM_VERSION,
+        provenance=provenance,
+        resolve_warnings=tuple(resolve_warnings),
         raw_cache=raw,
         preview_cache=preview,
         source_cache=source,
+        raw_cache_diag=raw_diag,
+        preview_cache_diag=preview_diag,
+        source_cache_diag=source_diag,
         pipeline=pipe,
-        raw_hit_rate=hit_rate(raw.hits, raw.misses),
-        preview_hit_rate=hit_rate(preview.hits, preview.misses),
-        source_hit_rate=hit_rate(source.hits, source.misses),
-        raw_cache_mib=bytes_to_mib(raw.current_bytes),
-        preview_cache_mib=bytes_to_mib(preview.current_bytes),
-        source_cache_mib=bytes_to_mib(source.current_bytes),
-        raw_cache_max_mib=bytes_to_mib(raw.max_bytes),
-        preview_cache_max_mib=bytes_to_mib(preview.max_bytes),
-        source_cache_max_mib=bytes_to_mib(source.max_bytes),
+        raw_hit_rate=raw_diag.hit_rate,
+        preview_hit_rate=preview_diag.hit_rate,
+        source_hit_rate=source_diag.hit_rate,
+        raw_cache_mib=raw_diag.current_mib,
+        preview_cache_mib=preview_diag.current_mib,
+        source_cache_mib=source_diag.current_mib,
+        raw_cache_max_mib=raw_diag.max_mib,
+        preview_cache_max_mib=preview_diag.max_mib,
+        source_cache_max_mib=source_diag.max_mib,
         raw_decode_count=int(pipe.raw_decodes),
         preview_generation_count=int(pipe.preview_generations),
         last_render_color_policy=last_render_color_policy,
+        last_render_alpha_mode=last_render_alpha_mode,
+        last_render_premultiplied=last_render_premultiplied,
+        last_render_scene_linear=last_render_scene_linear,
+        last_render_pixel_encoding=last_render_pixel_encoding,
         warnings=tuple(warnings),
         active_source_color_space=active_source,
         source_color_space_source=source_src,
@@ -376,24 +551,34 @@ def build_color_pipeline_diagnostics(
 
 
 def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> str:
-    """Plain-text dump suitable for clipboard copy."""
+    """Plain-text dump suitable for clipboard / bug reports (no Qt)."""
     working_hit = hit_rate(
         diagnostics.working_cache.hits,
         diagnostics.working_cache.misses,
     )
+    provenance = diagnostics.provenance
     lines = [
         "NOVA Layer Color Pipeline Diagnostics",
         f"Backend: {diagnostics.active_backend}",
         f"Active policy: {diagnostics.active_policy or '—'}",
+        f"Processing default: {diagnostics.processing_default_policy}",
+        f"Render default: {diagnostics.render_default_policy}",
+        f"SOURCE transform version: {diagnostics.source_transform_version}",
         f"Input: {diagnostics.input_color_space or '—'}",
         f"Display/View: {diagnostics.display or '—'} / {diagnostics.view or '—'}",
         f"Exposure: {diagnostics.exposure:g}",
         f"Transform Identity: {diagnostics.transform_identity}",
+        f"Transform Identity (display): {diagnostics.transform_identity_display}",
         f"Config: {diagnostics.config_path or '—'} "
         f"(source={diagnostics.config_source or '—'})",
         f"Fallback: {diagnostics.fallback_reason or '—'}",
         f"Shot: {diagnostics.shot_name or '—'}",
         f"Media: {diagnostics.media_path or '—'}",
+        f"Active frame: "
+        f"{diagnostics.active_frame if diagnostics.active_frame is not None else '—'}",
+        f"Provenance: backend={provenance.backend}, config={provenance.config}, "
+        f"input={provenance.input_color_space}, display={provenance.display}, "
+        f"view={provenance.view}, exposure={provenance.exposure}",
         f"Active source color space: "
         f"{diagnostics.active_source_color_space or '—'}",
         f"Source color space source: "
@@ -465,6 +650,10 @@ def format_color_pipeline_diagnostics(diagnostics: ColorPipelineDiagnostics) -> 
         f"Preview prefetch skips: {diagnostics.pipeline.preview_prefetch_skips}",
         f"Last render color policy: {diagnostics.last_render_color_policy or '—'}",
     ]
+    if diagnostics.resolve_warnings:
+        lines.append("")
+        lines.append("Resolve warnings:")
+        lines.extend(f"  - {item}" for item in diagnostics.resolve_warnings)
     if diagnostics.working_warnings:
         lines.append("")
         lines.append("Working warnings:")

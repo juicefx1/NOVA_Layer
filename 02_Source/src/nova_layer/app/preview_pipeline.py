@@ -505,6 +505,25 @@ class PreviewPipeline:
             preview_prefetch_skips=self._preview_prefetch_skips,
         )
 
+    def diagnostics_snapshot(self) -> ColorPipelineDiagnostics:
+        """Read-only Color Pipeline snapshot (no decode / no LRU mutation)."""
+        from nova_layer.app.color_pipeline_diagnostics import (
+            build_color_pipeline_diagnostics,
+        )
+
+        transform = self._display_transform
+        raw_diag = getattr(transform, "diagnostics", None)
+        transform_diagnostics = (
+            raw_diag if isinstance(raw_diag, DisplayTransformDiagnostics) else None
+        )
+        return build_color_pipeline_diagnostics(
+            pipeline=self,
+            transform_diagnostics=transform_diagnostics,
+            transform_identity=self.transform_identity,
+            working_settings=self.working_space_settings,
+            working_cache_stats=self.working_cache_stats,
+        )
+
     def set_reader(self, reader: MediaReader, *, keep_raw_cache: bool = False) -> None:
         with self._lock:
             self._reader = reader
