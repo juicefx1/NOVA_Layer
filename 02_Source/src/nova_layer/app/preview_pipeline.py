@@ -566,6 +566,19 @@ class PreviewPipeline:
         key: PreviewKey = (_resolve_path(path), frame_number, self._transform_id)
         return self._preview_cache.get(key)
 
+    def get_source(
+        self,
+        path: Path,
+        frame_number: int,
+    ) -> NDArray[np.uint8] | None:
+        """Return a copy of a cached SOURCE uint8 frame, or None (no decode)."""
+        key: PreviewKey = (
+            _resolve_path(path),
+            frame_number,
+            SOURCE_TRANSFORM_IDENTITY,
+        )
+        return self._source_cache.get(key)
+
     def prefetch_raw(
         self,
         path: Path,

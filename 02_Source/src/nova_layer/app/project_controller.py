@@ -809,6 +809,7 @@ class ProjectController(QObject):
                 media_path,
                 shot.range_start,
                 shot.range_end,
+                policy=ProcessingColorPolicy.SOURCE,
                 should_cancel=cancel_event.is_set,
                 report_progress=lambda current, _expected, message: report(
                     current, total, message
@@ -951,7 +952,13 @@ class ProjectController(QObject):
             return False
         return True
 
-    def _decode_shot_frames(self, shot: Shot) -> list[VideoFrame]:
+    def _decode_shot_frames(
+        self,
+        shot: Shot,
+        *,
+        policy: ProcessingColorPolicy = ProcessingColorPolicy.SOURCE,
+    ) -> list[VideoFrame]:
+        """Decode the shot range for processing (default SOURCE for propagation)."""
         if shot.media.source_path is None:
             raise ValueError("Source media is not linked.")
         media_path = Path(shot.media.source_path)
@@ -961,6 +968,7 @@ class ProjectController(QObject):
             media_path,
             shot.range_start,
             shot.range_end,
+            policy=policy,
         )
         return [
             VideoFrame(frame_number=frame_number, image=decoded[frame_number])

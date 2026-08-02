@@ -202,6 +202,10 @@ class FrameDecodeService(QObject):
         """Return a copy of a cached preview frame, or None on miss (does not decode)."""
         return self._pipeline.get_preview(path, frame_number)
 
+    def get_source_cached(self, path: Path, frame_number: int) -> NDArray[np.uint8] | None:
+        """Return a copy of a cached SOURCE frame, or None on miss (does not decode)."""
+        return self._pipeline.get_source(path, frame_number)
+
     def put_cached(
         self,
         path: Path,
