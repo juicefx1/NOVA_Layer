@@ -17,6 +17,16 @@ class SceneExrError(RuntimeError):
     """Raised when scene-linear EXR compose/write cannot complete."""
 
 
+def openexr_writer_available() -> bool:
+    """Return True when OpenEXR + Imath can be imported for scene/look EXR write."""
+    try:
+        import Imath  # type: ignore[import-untyped]
+        import OpenEXR  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return OpenEXR is not None and Imath is not None
+
+
 def compose_scene_rgba(
     scene_rgb: NDArray[np.float32],
     mask: NDArray[np.uint8],

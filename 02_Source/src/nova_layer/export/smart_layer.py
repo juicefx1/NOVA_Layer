@@ -15,12 +15,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from nova_layer.app.frame_decode_service import FrameDecodeService
-from nova_layer.app.scene_range_decode import decode_scene_frame_range
 from nova_layer.domain.models import SmartLayerRender
 from nova_layer.export.scene_exr import (
     SceneExrError,
     build_scene_export_manifest_fields,
     compose_scene_rgba,
+    openexr_writer_available,
     write_scene_openexr_rgba,
 )
 from nova_layer.ports.media import MediaReadError
@@ -35,10 +35,37 @@ class ExportFormat(StrEnum):
 
 FORMAT_LABELS = {
     ExportFormat.PNG_SEQUENCE: "NOVA Layer RGBA PNG Sequence",
-    ExportFormat.OPENEXR_SEQUENCE: "NOVA Layer RGBA OpenEXR Sequence",
+    ExportFormat.OPENEXR_SEQUENCE: "NOVA Layer RGBA OpenEXR (Current Render Look)",
     ExportFormat.RGBA_MOV: "NOVA Layer RGBA QuickTime",
-    ExportFormat.SCENE_OPENEXR_SEQUENCE: "NOVA Layer Scene-Linear OpenEXR Sequence",
+    ExportFormat.SCENE_OPENEXR_SEQUENCE: "NOVA Layer RGBA OpenEXR (Scene Linear)",
 }
+
+# Workspace / dialog choices: (display label, format id, description).
+EXPORT_FORMAT_CHOICES: tuple[tuple[str, str, str], ...] = (
+    (
+        "PNG Sequence",
+        ExportFormat.PNG_SEQUENCE.value,
+        "Exports packaged RGBA PNG frames from the current render.",
+    ),
+    (
+        "OpenEXR — Current Render Look",
+        ExportFormat.OPENEXR_SEQUENCE.value,
+        "Packages PREVIEW/SOURCE render RGB as half EXR. Not scene-linear.",
+    ),
+    (
+        "OpenEXR — Scene Linear",
+        ExportFormat.SCENE_OPENEXR_SEQUENCE.value,
+        "Exports file-native scene float RGB with the render mask as straight "
+        "alpha. Requires an OpenEXR image sequence and OpenImageIO.",
+    ),
+    (
+        "RGBA QuickTime (.mov)",
+        ExportFormat.RGBA_MOV.value,
+        "Exports a QuickTime movie from packaged RGBA PNG frames.",
+    ),
+)
+
+SCENE_LINEAR_EXPORT_DESCRIPTION = EXPORT_FORMAT_CHOICES[2][2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +176,8 @@ def export_smart_layer_assets(
     input_color_space: str | None = None,
     config_path: str | None = None,
     config_source: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    report_progress: Callable[[int, int, str], None] | None = None,
 ) -> SmartLayerExportResult:
     if not destination_directory.is_dir():
         raise SmartLayerExportError("Choose an existing export destination directory.")
@@ -218,6 +247,8 @@ def export_smart_layer_assets(
                 scene_decoder=scene_decoder,
                 mask_loader=mask_loader,
                 input_color_space=input_color_space,
+                should_cancel=should_cancel,
+                report_progress=report_progress,
             )
             scene_source_color_space = scene_tags.get("source_color_space")
             scene_source_color_space_source = scene_tags.get(
@@ -295,60 +326,76 @@ def _export_scene_openexr_sequence(
     scene_decoder: FrameDecodeService | None,
     mask_loader: Callable[[str], NDArray[np.uint8]] | None,
     input_color_space: str | None,
+    should_cancel: Callable[[], bool] | None = None,
+    report_progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    """Frame-at-a-time True Scene EXR export (Phase 10A-2).
+
+    Holds at most one ``SceneFrame`` in locals per loop iteration. Does not call
+    ``decode_scene_frame_range`` (no full-range dict). Staging cleanup on failure
+    is handled by the caller.
+    """
     _ = package_path  # Scene pixels come from media+mask, not packaged render PNGs.
     if scene_media_path is None or scene_decoder is None or mask_loader is None:
         raise SmartLayerExportError(
             "True Scene export requires an EXR image sequence and OpenImageIO "
             "(scene media path, decoder, and mask loader)."
         )
+    if not openexr_writer_available():
+        raise SmartLayerExportError(
+            "True Scene export requires the optional desktop dependency `OpenEXR` "
+            "(writer)."
+        )
     if not render.frames:
         raise SmartLayerExportError("True Scene export requires render frames with masks.")
 
-    try:
-        scenes = decode_scene_frame_range(
-            scene_decoder,
-            scene_media_path,
-            render.frame_start,
-            render.frame_end,
-        )
-    except MediaReadError as exc:
-        raise SmartLayerExportError(
-            "True Scene export requires an EXR image sequence and OpenImageIO. "
-            f"({exc})"
-        ) from exc
-    except Exception as exc:
-        raise SmartLayerExportError(
-            "True Scene export requires an EXR image sequence and OpenImageIO. "
-            f"({exc})"
-        ) from exc
+    cancel = should_cancel or (lambda: False)
+    report = report_progress or (lambda *_args: None)
+    total = len(render.frames)
 
-    first_frame = scenes.get(render.frame_start)
-    source_color_space = first_frame.color_space if first_frame is not None else None
-    source_color_space_source = (
-        first_frame.color_space_source if first_frame is not None else "unspecified"
-    )
-    source_tag_for_header = (
-        str(source_color_space).strip()
-        if source_color_space is not None and str(source_color_space).strip()
-        else "unspecified"
-    )
-
-    header_meta = {
-        "novaColorPolicy": "scene",
-        "novaSceneLinear": "true",
-        "novaAlphaMode": "straight",
-        "novaSourceColorSpace": source_tag_for_header,
-        "novaInterpretationColorSpace": str(input_color_space or ""),
-        "novaPixelEncoding": "file_native_scene_half",
-    }
+    source_color_space: str | None = None
+    source_color_space_source: str | None = None
+    header_meta: dict[str, str] | None = None
     exported_files: list[dict[str, Any]] = []
-    for frame in render.frames:
-        scene = scenes.get(frame.frame_number)
-        if scene is None:
-            raise SmartLayerExportError(
-                f"True Scene export missing scene frame {frame.frame_number}."
+
+    report(0, total, "Exporting scene-linear OpenEXR sequence")
+    for index, frame in enumerate(render.frames, start=1):
+        if cancel():
+            raise SmartLayerExportError("True Scene export cancelled.")
+        report(index - 1, total, f"Scene export frame {frame.frame_number}")
+        try:
+            scene = scene_decoder.get_scene_frame(
+                scene_media_path,
+                frame.frame_number,
             )
+        except MediaReadError as exc:
+            raise SmartLayerExportError(
+                "True Scene export requires an EXR image sequence and OpenImageIO. "
+                f"(frame {frame.frame_number}: {exc})"
+            ) from exc
+        except Exception as exc:
+            raise SmartLayerExportError(
+                "True Scene export failed decoding scene frame "
+                f"{frame.frame_number}: {exc}"
+            ) from exc
+
+        if source_color_space is None:
+            source_color_space = scene.color_space
+            source_color_space_source = scene.color_space_source
+            source_tag_for_header = (
+                str(source_color_space).strip()
+                if source_color_space is not None and str(source_color_space).strip()
+                else "unspecified"
+            )
+            header_meta = {
+                "novaColorPolicy": "scene",
+                "novaSceneLinear": "true",
+                "novaAlphaMode": "straight",
+                "novaSourceColorSpace": source_tag_for_header,
+                "novaInterpretationColorSpace": str(input_color_space or ""),
+                "novaPixelEncoding": "file_native_scene_half",
+            }
+
         if not frame.mask_reference:
             raise SmartLayerExportError(
                 f"True Scene export missing mask for frame {frame.frame_number}."
@@ -363,6 +410,8 @@ def _export_scene_openexr_sequence(
             rgba = compose_scene_rgba(scene.pixels, mask)
         except ValueError as exc:
             raise SmartLayerExportError(str(exc)) from exc
+        # Drop scene reference before next decode so only RGBA + mask live briefly.
+        del scene
         destination = staging_path / f"frame_{frame.frame_number:06d}.exr"
         try:
             write_scene_openexr_rgba(
@@ -374,6 +423,7 @@ def _export_scene_openexr_sequence(
             )
         except SceneExrError as exc:
             raise SmartLayerExportError(str(exc)) from exc
+        del rgba
         exported_files.append(
             {
                 "name": destination.name,
@@ -381,6 +431,8 @@ def _export_scene_openexr_sequence(
                 "sha256": _sha256(destination),
             }
         )
+        report(index, total, f"Scene export frame {frame.frame_number} done")
+
     return exported_files, {
         "source_color_space": source_color_space,
         "source_color_space_source": source_color_space_source,

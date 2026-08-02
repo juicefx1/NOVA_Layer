@@ -1627,21 +1627,50 @@ class WorkspaceWindow(QMainWindow):
         )
 
     def _request_render_export(self) -> None:
-        format_labels = {
-            "PNG Sequence": "png_sequence",
-            "OpenEXR Sequence": "openexr_sequence",
-            "RGBA QuickTime (.mov)": "rgba_mov",
-        }
+        from nova_layer.export.smart_layer import (
+            EXPORT_FORMAT_CHOICES,
+            ExportFormat,
+            SCENE_LINEAR_EXPORT_DESCRIPTION,
+            SmartLayerExportError,
+        )
+
+        format_labels = {label: format_id for label, format_id, _desc in EXPORT_FORMAT_CHOICES}
+        descriptions = {label: desc for label, _format_id, desc in EXPORT_FORMAT_CHOICES}
+        prompt = (
+            "Production format:\n\n"
+            "OpenEXR — Current Render Look:\n"
+            "  PREVIEW/SOURCE render RGB packaged as half EXR (not scene-linear).\n\n"
+            "OpenEXR — Scene Linear:\n"
+            f"  {SCENE_LINEAR_EXPORT_DESCRIPTION}\n"
+            "  Viewer look is not applied (true scene export)."
+        )
         label, accepted = QInputDialog.getItem(
             self,
             "Export Smart Layer Render",
-            "Production format:",
+            prompt,
             list(format_labels),
             0,
             False,
         )
         if not accepted:
             return
+        format_id = format_labels[label]
+        if format_id == ExportFormat.SCENE_OPENEXR_SEQUENCE.value:
+            try:
+                shot = self.controller.active_shot
+                if shot is None:
+                    raise SmartLayerExportError(
+                        "True Scene export requires an active shot with an EXR "
+                        "image sequence and OpenImageIO."
+                    )
+                self.controller._validate_true_scene_export_ready(shot)
+            except SmartLayerExportError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Scene Linear Export Unavailable",
+                    f"{descriptions[label]}\n\n{exc}",
+                )
+                return
         directory = QFileDialog.getExistingDirectory(self, "Export Smart Layer Render")
         if not directory:
             return
@@ -1657,7 +1686,7 @@ class WorkspaceWindow(QMainWindow):
         self.controller.export_smart_layer_render(
             Path(directory),
             version,
-            format=format_labels[label],
+            format=format_id,
         )
 
     def _smart_layer_export_ready(self, export_path: str) -> None:

@@ -3059,36 +3059,59 @@ class ProjectController(QObject):
         return result.path
 
     def _validate_true_scene_export_ready(self, shot: Shot) -> None:
-        """Raise SmartLayerExportError unless EXR sequence + OIIO scene path is available."""
+        """Raise SmartLayerExportError unless EXR sequence + OIIO + OpenEXR writer ready.
+
+        Does not fall back to look-baked OpenEXR when True Scene is unavailable.
+        """
+        from nova_layer.export.scene_exr import openexr_writer_available
+
         if shot.media.source_path is None:
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO."
+                "True Scene export unavailable: no media source path on the active shot. "
+                "Requires an OpenEXR image sequence and OpenImageIO."
             )
         media_path = Path(shot.media.source_path)
         if not isinstance(self._media_reader, ImageSequenceReader):
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO."
+                "True Scene export unavailable: media reader is not an image sequence. "
+                "Requires an OpenEXR image sequence and OpenImageIO "
+                f"(reader={type(self._media_reader).__name__})."
             )
         try:
             files = list_sequence_files(media_path)
         except Exception as exc:
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO."
+                "True Scene export unavailable: could not list image sequence files. "
+                f"Requires an OpenEXR image sequence and OpenImageIO. ({exc})"
             ) from exc
-        if not files or files[0].suffix.lower() != ".exr":
+        if not files:
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO."
+                "True Scene export unavailable: empty image sequence. "
+                "Requires an OpenEXR image sequence and OpenImageIO."
+            )
+        if files[0].suffix.lower() != ".exr":
+            raise SmartLayerExportError(
+                "True Scene export unavailable: sequence is not OpenEXR "
+                f"(first file suffix={files[0].suffix!r}). "
+                "Requires an OpenEXR image sequence and OpenImageIO."
             )
         if _load_openimageio() is None:
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO."
+                "True Scene export unavailable: OpenImageIO is not installed. "
+                "Requires an OpenEXR image sequence and OpenImageIO."
+            )
+        if not openexr_writer_available():
+            raise SmartLayerExportError(
+                "True Scene export unavailable: OpenEXR writer is not installed. "
+                "Requires the optional desktop dependency `OpenEXR`."
             )
         # Probe one scene frame to reject Pillow-only environments early.
         try:
             self._frame_decoder.get_scene_frame(media_path, 0)
         except MediaReadError as exc:
             raise SmartLayerExportError(
-                "True Scene export requires an EXR image sequence and OpenImageIO. "
+                "True Scene export unavailable: scene decode probe failed. "
+                "Requires an OpenEXR image sequence and OpenImageIO. "
                 f"({exc})"
             ) from exc
 
