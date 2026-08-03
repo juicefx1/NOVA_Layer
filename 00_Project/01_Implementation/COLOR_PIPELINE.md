@@ -1,13 +1,16 @@
 # NOVA Layer Color Pipeline
 
-**Status:** Active (Phase 8 / Phase 9A lock / Phase 10A–10B / Phase 10C-1 contracts)  
+**Status:** Active (Phase 8 / Phase 9A lock / Phase 10A–10B / Phase 10C-1 contracts /
+Phase 10C EXR interoperability documented)  
 **Audience:** Developer, Maintainer  
 **Scope:** Pixel contracts, processing color policies, raw/preview/source caches, Smart Layer render/export color metadata.
 
 This document records the color pipeline completed through Phase 8, with True Scene
-export (10A), SceneFrame color-space tagging (10B), and working-space **contracts**
-(10C-1). System-layer architecture remains in `ARCHITECTURE.md`. This file is the
-authority for viewer / processing / render **pixel contracts** and cache behaviour.
+export (10A), SceneFrame color-space tagging / EXR header convenience metadata (10B),
+working-space **contracts** (10C-1), and EXR host interoperability notes (10C —
+see [`EXR_INTEROPERABILITY.md`](EXR_INTEROPERABILITY.md)). System-layer architecture
+remains in `ARCHITECTURE.md`. This file is the authority for viewer / processing /
+render **pixel contracts** and cache behaviour.
 
 Authority for the SOURCE bake identity string:
 
@@ -197,6 +200,9 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
      - `input_color_space` — backward-compatible alias of interpretation
    - Straight alpha (`A = mask/255`, RGB preserved where A=0)
    - half OpenEXR with **no** 0–1 remapping; `pixel_encoding=file_native_scene_half`
+   - EXR header carries a **best-effort convenience copy** of `nova:*` fields
+     (`manifest.json` remains authoritative) — see
+     [`EXR_INTEROPERABILITY.md`](EXR_INTEROPERABILITY.md)
    - Requires EXR image sequence + OpenImageIO
    - Does **not** change package render PNGs or render-time color policy
 5. **Metadata sidecar:** `renders/vXXXX/color_policy.json` (project schema unchanged)
@@ -247,3 +253,4 @@ lifetime pipeline stats and are **not** reset by preview-only clears.
 | Alpha compose | `nova_layer.app.preview_extraction.compose_rgba` |
 | Export | `nova_layer.export.smart_layer` |
 | Golden regression | `02_Source/tests/test_color_pipeline_golden.py` |
+| EXR host interoperability | [`EXR_INTEROPERABILITY.md`](EXR_INTEROPERABILITY.md) |

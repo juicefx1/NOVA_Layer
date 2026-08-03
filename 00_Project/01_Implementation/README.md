@@ -163,6 +163,14 @@ Propagation / Render color policies (PREVIEW / SOURCE / SCENE), raw/preview/sour
 caches, and Smart Layer export color metadata. System-layer architecture stays in
 `ARCHITECTURE.md`; this file locks the Phase 8 color pipeline for regression.
 
+### EXR_INTEROPERABILITY.md
+
+Phase 10C audit notes for NOVA-authored OpenEXR in external tools (OpenEXR Python,
+RV, optional oiiotool / Nuke / DJV). Covers Scene Linear vs Current Render Look,
+`nova:*` header convenience metadata vs authoritative `manifest.json`, RV Rec709
+inference caveat, privacy/sanitization, CI skip policy, and untracked fixture
+rules. Pixel contracts remain in `COLOR_PIPELINE.md`.
+
 ### 04_PROJECT_STRUCTURE.md
 
 **Superseded** as an architecture specification. Retained as a historical

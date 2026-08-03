@@ -7,6 +7,7 @@ __pycache__/
 *.py[cod]
 *.nova/
 *.nova.tmp/
+tmp/
 cache/
 checkpoints/
 models/
