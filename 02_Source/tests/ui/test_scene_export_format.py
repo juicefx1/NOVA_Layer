@@ -136,8 +136,13 @@ def test_workspace_scene_linear_prevalidates_before_export(
     export_calls: list[object] = []
     monkeypatch.setattr(
         controller,
+        "start_smart_layer_export",
+        lambda *args, **kwargs: export_calls.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        controller,
         "export_smart_layer_render",
-        lambda *args, **kwargs: export_calls.append((args, kwargs)),
+        lambda *args, **kwargs: export_calls.append(("sync", args, kwargs)),
     )
     file_dialog_calls: list[int] = []
 
@@ -193,9 +198,9 @@ def test_workspace_scene_linear_exports_when_supported(
 
     def _export(directory, version=None, format=None):  # noqa: ANN001
         calls.append((directory, version, format))
-        return None
+        return True
 
-    monkeypatch.setattr(controller, "export_smart_layer_render", _export)
+    monkeypatch.setattr(controller, "start_smart_layer_export", _export)
     window._request_render_export()
     assert len(calls) == 1
     assert calls[0][0] == dest

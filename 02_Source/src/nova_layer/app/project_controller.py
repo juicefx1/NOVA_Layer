@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import file_digest
 from pathlib import Path
@@ -255,6 +256,7 @@ class ProjectController(QObject):
     processing_progress = Signal(str, int, int, str)
     processing_finished = Signal(str)
     processing_cancelled = Signal(str)
+    processing_failed = Signal(str, str)
     extraction_preview_ready = Signal(int, object, str)
     smart_layer_render_ready = Signal(object)
     background_removal_preview_ready = Signal(int, object)
@@ -324,6 +326,11 @@ class ProjectController(QObject):
         self._last_render_color_policy: str | None = None
         self._sam_processing_profile = SamProcessingProfile()
         self._last_sam_input_diagnostics: ProcessingInputDiagnostics | None = None
+
+    def shutdown(self) -> None:
+        """Cancel active processing (including export) before teardown."""
+        if self._jobs.is_running:
+            self._jobs.cancel()
 
     @property
     def project(self) -> Project | None:
@@ -2507,6 +2514,10 @@ class ProjectController(QObject):
             if preview is not None:
                 _label, frame_number, rgba = preview
                 self.background_removal_preview_ready.emit(frame_number, rgba)
+        elif result.name == "smart_layer_export":
+            export_path = cast(Path | str | None, result.value)
+            if export_path is not None:
+                self.smart_layer_export_ready.emit(str(export_path))
         self.processing_finished.emit(result.name)
 
     def _commit_skeleton_fusion_detection(
@@ -2956,7 +2967,41 @@ class ProjectController(QObject):
         version: int | None = None,
         *,
         format: ExportFormat | str = ExportFormat.PNG_SEQUENCE,
+        should_cancel: Callable[[], bool] | None = None,
+        report_progress: ProgressCallback | None = None,
     ) -> Path | None:
+        """Synchronous Smart Layer export (compat). Prefer :meth:`start_smart_layer_export`."""
+        try:
+            path = self._execute_smart_layer_export(
+                destination_directory,
+                version,
+                format=format,
+                should_cancel=should_cancel,
+                report_progress=report_progress,
+            )
+        except (OSError, ValueError, SmartLayerExportError, FileNotFoundError, MediaReadError) as exc:
+            self.error_occurred.emit(f"Smart Layer export failed: {exc}")
+            return None
+        self.smart_layer_export_ready.emit(str(path))
+        return path
+
+    def start_smart_layer_export(
+        self,
+        destination_directory: Path,
+        version: int | None = None,
+        *,
+        format: ExportFormat | str = ExportFormat.PNG_SEQUENCE,
+    ) -> bool:
+        """Start Smart Layer export on the ProcessingJobService worker pool (non-blocking)."""
+        if self._jobs.is_running:
+            self.error_occurred.emit("Another processing job is already running.")
+            return False
+        # Pre-validate format early so the job UI does not flash for bad ids.
+        try:
+            ExportFormat(str(format)) if not isinstance(format, ExportFormat) else format
+        except ValueError:
+            self.error_occurred.emit(f"Unsupported Smart Layer export format: {format}")
+            return False
         shot = self.active_shot
         if (
             shot is None
@@ -2965,39 +3010,79 @@ class ProjectController(QObject):
             or self._project is None
         ):
             self.error_occurred.emit("No Smart Layer render is available for export.")
-            return None
+            return False
+        destination = Path(destination_directory)
+        export_format: ExportFormat | str = format
+
+        def operation(cancel_event: Event, report: ProgressCallback) -> object:
+            try:
+                return self._execute_smart_layer_export(
+                    destination,
+                    version,
+                    format=export_format,
+                    should_cancel=cancel_event.is_set,
+                    report_progress=report,
+                )
+            except SmartLayerExportError as exc:
+                if cancel_event.is_set() or "cancelled" in str(exc).casefold():
+                    # Ensure JobWorker emits cancelled (not completed(None)).
+                    cancel_event.set()
+                    return None
+                raise
+
+        if not self._jobs.start("smart_layer_export", operation):
+            self.error_occurred.emit("Another processing job is already running.")
+            return False
+        return True
+
+    def cancel_smart_layer_export(self) -> bool:
+        """Cancel a running Smart Layer export (or any active processing job)."""
+        return self._jobs.cancel()
+
+    def _execute_smart_layer_export(
+        self,
+        destination_directory: Path,
+        version: int | None = None,
+        *,
+        format: ExportFormat | str = ExportFormat.PNG_SEQUENCE,
+        should_cancel: Callable[[], bool] | None = None,
+        report_progress: ProgressCallback | None = None,
+    ) -> Path:
+        """Run export and return the output path. Raises on failure (no UI signals)."""
+        shot = self.active_shot
+        if (
+            shot is None
+            or not shot.smart_layers
+            or self._package_path is None
+            or self._project is None
+        ):
+            raise SmartLayerExportError("No Smart Layer render is available for export.")
         layer = shot.smart_layers[0]
         if not layer.renders:
-            self.error_occurred.emit("Render the Smart Layer before exporting.")
-            return None
+            raise SmartLayerExportError("Render the Smart Layer before exporting.")
         render = (
             next((item for item in layer.renders if item.version == version), None)
             if version is not None
             else layer.renders[-1]
         )
         if render is None:
-            self.error_occurred.emit(f"Smart Layer render v{version} does not exist.")
-            return None
+            raise SmartLayerExportError(f"Smart Layer render v{version} does not exist.")
         integrity = self.verify_smart_layer_render(render.version)
         if not integrity.valid:
-            self.error_occurred.emit(
+            raise SmartLayerExportError(
                 "Smart Layer render failed integrity verification and cannot be exported."
             )
-            return None
         try:
             export_format = (
                 format if isinstance(format, ExportFormat) else ExportFormat(str(format))
             )
-        except ValueError:
-            self.error_occurred.emit(f"Unsupported Smart Layer export format: {format}")
-            return None
+        except ValueError as exc:
+            raise SmartLayerExportError(
+                f"Unsupported Smart Layer export format: {format}"
+            ) from exc
         scene_kwargs: dict[str, object] = {}
         if export_format is ExportFormat.SCENE_OPENEXR_SEQUENCE:
-            try:
-                self._validate_true_scene_export_ready(shot)
-            except SmartLayerExportError as exc:
-                self.error_occurred.emit(str(exc))
-                return None
+            self._validate_true_scene_export_ready(shot)
             assert shot.media.source_path is not None
             diagnostics = self.display_transform_diagnostics
             input_cs = (
@@ -3030,32 +3115,29 @@ class ProjectController(QObject):
         export_stem = (
             f"NOVA_{safe_layer_name or 'Smart_Layer'}_v{render.version:04d}_{export_format.value}"
         )
-        try:
-            result = export_smart_layer_assets(
-                package_path=self._package_path,
-                destination_directory=destination_directory,
-                export_stem=export_stem,
-                render=render,
-                format=export_format,
-                project={"id": str(self._project.id), "name": self._project.name},
-                shot={
-                    "id": str(shot.id),
-                    "name": shot.name,
-                    "range_start": render.frame_start,
-                    "range_end": render.frame_end,
-                    "frame_rate": shot.media.frame_rate,
-                    "width": shot.media.width,
-                    "height": shot.media.height,
-                },
-                smart_layer={"id": str(layer.id), "name": layer.name},
-                frame_rate=shot.media.frame_rate,
-                color_policy=load_render_color_metadata(self._package_path, render),
-                **scene_kwargs,  # type: ignore[arg-type]
-            )
-        except (OSError, ValueError, SmartLayerExportError, FileNotFoundError, MediaReadError) as exc:
-            self.error_occurred.emit(f"Smart Layer export failed: {exc}")
-            return None
-        self.smart_layer_export_ready.emit(str(result.path))
+        result = export_smart_layer_assets(
+            package_path=self._package_path,
+            destination_directory=destination_directory,
+            export_stem=export_stem,
+            render=render,
+            format=export_format,
+            project={"id": str(self._project.id), "name": self._project.name},
+            shot={
+                "id": str(shot.id),
+                "name": shot.name,
+                "range_start": render.frame_start,
+                "range_end": render.frame_end,
+                "frame_rate": shot.media.frame_rate,
+                "width": shot.media.width,
+                "height": shot.media.height,
+            },
+            smart_layer={"id": str(layer.id), "name": layer.name},
+            frame_rate=shot.media.frame_rate,
+            color_policy=load_render_color_metadata(self._package_path, render),
+            should_cancel=should_cancel,
+            report_progress=report_progress,
+            **scene_kwargs,  # type: ignore[arg-type]
+        )
         return result.path
 
     def _validate_true_scene_export_ready(self, shot: Shot) -> None:
@@ -3118,14 +3200,25 @@ class ProjectController(QObject):
     def _job_failed(self, name: str, message: str) -> None:
         if name == "skeleton_fusion_detection":
             if "no semantic labels matching" in message:
-                self.error_occurred.emit(
+                detail = (
                     "Automatic pose detection found no joints that match the labeled artist "
                     "skeleton. Check joint labels or the Depth/Pose detector configuration."
                 )
+                self.error_occurred.emit(detail)
+                self.processing_failed.emit(name, detail)
                 return
-            self.error_occurred.emit(f"Automatic pose detection failed: {message}")
+            detail = f"Automatic pose detection failed: {message}"
+            self.error_occurred.emit(detail)
+            self.processing_failed.emit(name, detail)
             return
-        self.error_occurred.emit(f"{name} failed: {message}")
+        if name == "smart_layer_export":
+            detail = f"Smart Layer export failed: {message}"
+            self.error_occurred.emit(detail)
+            self.processing_failed.emit(name, detail)
+            return
+        detail = f"{name} failed: {message}"
+        self.error_occurred.emit(detail)
+        self.processing_failed.emit(name, detail)
 
     def validation_previews(
         self,

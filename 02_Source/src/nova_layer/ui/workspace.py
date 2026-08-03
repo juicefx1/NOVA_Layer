@@ -7,6 +7,7 @@ from uuid import UUID
 import numpy as np
 from numpy.typing import NDArray
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -38,6 +39,14 @@ from nova_layer.domain.models import (
     SkeletonGuidance,
     SmartLayerRender,
 )
+
+_PROCESSING_JOB_LABELS = {
+    "smart_layer_export": "Smart Layer Export",
+    "smart_layer_render": "Smart Layer Render",
+    "bidirectional_propagation": "Propagation",
+    "background_removal_clip": "Background Removal Clip",
+    "background_removal_preview": "Background Removal Preview",
+}
 from nova_layer.domain.skeleton_presets import openpose_body_25_preset
 from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
 from nova_layer.app.effective_color_settings import (
@@ -159,6 +168,7 @@ class WorkspaceWindow(QMainWindow):
         controller.processing_progress.connect(self._processing_progress)
         controller.processing_finished.connect(self._processing_finished)
         controller.processing_cancelled.connect(self._processing_cancelled)
+        controller.processing_failed.connect(self._processing_failed)
         controller.media_link_state_changed.connect(self._media_link_state_changed)
         controller.recovery_available.connect(self._recovery_available)
         controller.project_recovered.connect(self._project_recovered)
@@ -1602,7 +1612,7 @@ class WorkspaceWindow(QMainWindow):
     def _refresh_background_removal_clip_controls(self) -> None:
         readiness = self.controller.background_removal_clip_readiness()
         self.bg_removal_clip_button.setVisible(True)
-        busy = self.cancel_button.isVisible()
+        busy = not self.cancel_button.isHidden()
         self.bg_removal_clip_button.setEnabled(readiness.ready and not busy)
         if readiness.ready:
             self.bg_removal_clip_button.setToolTip(
@@ -1634,6 +1644,13 @@ class WorkspaceWindow(QMainWindow):
             SmartLayerExportError,
         )
 
+        if not self.cancel_button.isHidden():
+            QMessageBox.warning(
+                self,
+                "Export Busy",
+                "Another processing job is running. Cancel it before exporting.",
+            )
+            return
         format_labels = {label: format_id for label, format_id, _desc in EXPORT_FORMAT_CHOICES}
         descriptions = {label: desc for label, _format_id, desc in EXPORT_FORMAT_CHOICES}
         prompt = (
@@ -1683,11 +1700,13 @@ class WorkspaceWindow(QMainWindow):
                 "or Render Smart Layer first, then export.",
             )
             return
-        self.controller.export_smart_layer_render(
+        started = self.controller.start_smart_layer_export(
             Path(directory),
             version,
             format=format_id,
         )
+        if not started:
+            return
 
     def _smart_layer_export_ready(self, export_path: str) -> None:
         self.statusBar().showMessage(f"Smart Layer exported: {export_path}")
@@ -1731,7 +1750,8 @@ class WorkspaceWindow(QMainWindow):
         self.delete_render_button.setEnabled(False)
         self.retrack_pose_button.setEnabled(False)
         self.auto_fuse_pose_button.setEnabled(False)
-        self.statusBar().showMessage(f"Processing: {name}")
+        label = _PROCESSING_JOB_LABELS.get(name, name)
+        self.statusBar().showMessage(f"Processing: {label}")
 
     def _processing_progress(
         self,
@@ -1747,12 +1767,26 @@ class WorkspaceWindow(QMainWindow):
 
     def _processing_finished(self, name: str) -> None:
         self._reset_processing_ui()
-        self.statusBar().showMessage(f"Completed: {name}")
+        label = _PROCESSING_JOB_LABELS.get(name, name)
+        self.statusBar().showMessage(f"Completed: {label}")
 
     def _processing_cancelled(self, name: str) -> None:
         self._reset_processing_ui()
         self.propagate_button.setVisible(True)
-        self.statusBar().showMessage(f"Cancelled: {name} — no partial results committed")
+        if name == "smart_layer_export":
+            self.statusBar().showMessage(
+                "Export cancelled — no partial export path committed"
+            )
+        else:
+            label = _PROCESSING_JOB_LABELS.get(name, name)
+            self.statusBar().showMessage(
+                f"Cancelled: {label} — no partial results committed"
+            )
+
+    def _processing_failed(self, name: str, message: str) -> None:
+        self._reset_processing_ui()
+        label = _PROCESSING_JOB_LABELS.get(name, name)
+        self.statusBar().showMessage(f"Failed: {label}: {message}")
 
     def _reset_processing_ui(self) -> None:
         self.processing_progress.setVisible(False)
@@ -1831,6 +1865,10 @@ class WorkspaceWindow(QMainWindow):
         self.viewer.set_mask_overlay(None)
         self._show_review_controls(False)
         self.statusBar().showMessage("Refine Artist Guidance and generate again")
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self.controller.shutdown()
+        super().closeEvent(event)
 
     def _update_guidance_summary(
         self,
