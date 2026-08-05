@@ -5,6 +5,7 @@ import zlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from pytestqt.qtbot import QtBot
 
 from nova_layer.app.object_workflow_controller import ObjectWorkflowController
@@ -496,3 +497,89 @@ class _MemoryClipboard:
 
     def write_text(self, text: str) -> None:
         self.text = text
+
+
+def test_workspace_manager_api_returns_manager_instance() -> None:
+    """Controller contract: workspace_manager is a method returning WorkspaceManager."""
+    from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
+
+    service = ObjectWorkflowService(
+        store=JsonProjectStore(),
+        inference=MockCoreInferenceEngine(),
+        extraction=MockPrecisionExtractionEngine(),
+    )
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "workspace.json"
+        workspace = WorkspaceManager(path)
+        workspace.load()
+        controller = ObjectWorkflowController(service, workspace=workspace)
+        manager = controller.workspace_manager()
+        assert isinstance(manager, WorkspaceManager)
+        assert manager is workspace
+        assert manager.load_error is None
+
+
+def test_workspace_recovery_skips_dialog_when_load_error_none(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
+
+    service = ObjectWorkflowService(
+        store=JsonProjectStore(),
+        inference=MockCoreInferenceEngine(),
+        extraction=MockPrecisionExtractionEngine(),
+    )
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "workspace.json"
+        workspace = WorkspaceManager(path)
+        workspace.load()
+        assert workspace.load_error is None
+        controller = ObjectWorkflowController(service, workspace=workspace)
+        prompts: list[str] = []
+
+        def _fake_warning(*_a, **_k):  # noqa: ANN001
+            prompts.append("prompted")
+            return QMessageBox.StandardButton.Ignore
+
+        monkeypatch.setattr(QMessageBox, "warning", _fake_warning)
+        window = ObjectWorkflowWindow(controller)
+        qtbot.addWidget(window)
+        assert prompts == []
+        assert controller.workspace_manager().load_error is None
+
+
+def test_workspace_recovery_prompts_when_load_error_set(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
+
+    service = ObjectWorkflowService(
+        store=JsonProjectStore(),
+        inference=MockCoreInferenceEngine(),
+        extraction=MockPrecisionExtractionEngine(),
+    )
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "workspace.json"
+        path.write_text("{not-json", encoding="utf-8")
+        workspace = WorkspaceManager(path)
+        workspace.load()
+        assert workspace.load_error is not None
+        controller = ObjectWorkflowController(service, workspace=workspace)
+        prompts: list[str] = []
+
+        def _fake_warning(_parent, _title, text, *_a, **_k):  # noqa: ANN001
+            prompts.append(text)
+            return QMessageBox.StandardButton.Ignore
+
+        monkeypatch.setattr(QMessageBox, "warning", _fake_warning)
+        window = ObjectWorkflowWindow(controller)
+        qtbot.addWidget(window)
+        assert len(prompts) == 1
+        assert "could not be loaded" in prompts[0]
+        assert controller.workspace_manager().load_error is None

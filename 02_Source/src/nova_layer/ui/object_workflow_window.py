@@ -1023,7 +1023,8 @@ class ObjectWorkflowWindow(QMainWindow):
         QMessageBox.critical(self, "Object Workflow", format_user_error(message))
 
     def _maybe_prompt_workspace_recovery(self) -> None:
-        error = self.controller.workspace_manager.load_error
+        workspace = self.controller.workspace_manager()
+        error = workspace.load_error
         if not error:
             return
         answer = QMessageBox.warning(
@@ -1038,7 +1039,7 @@ class ObjectWorkflowWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Reset:
             self.controller.reset_workspace_session()
             self.statusBar().showMessage("Workspace preferences reset.", 5000)
-        self.controller.workspace_manager.clear_load_error()
+        workspace.clear_load_error()
 
     def _text_entry_has_focus(self) -> bool:
         focused = QApplication.focusWidget()
