@@ -203,11 +203,24 @@ Desktop dependencies can be installed separately:
 python -m pip install -e '.[desktop,dev]'
 ```
 
-The desktop extra includes OpenEXR for production Smart Layer export. Export a verified render as
-PNG sequence, OpenEXR half-float RGBA, or lossless RGBA QuickTime:
+The desktop extra includes OpenEXR, Pillow, PySide6, PyAV, and NumPy for the Workspace
+GUI and production Smart Layer export (PNG sequence, OpenEXR Current Render Look,
+OpenEXR Scene Linear, and lossless RGBA QuickTime).
+
+Scene Linear (`scene_openexr_sequence`) additionally requires OpenImageIO for EXR
+scene-float decode. Where PyPI wheels exist:
+
+```bash
+python -m pip install -e '.[desktop,oiio]'
+```
+
+On hosts without OpenImageIO wheels (common on macOS), install OpenImageIO via conda
+or the system package manager so `import OpenImageIO` succeeds, then use
+`nova-layer[desktop]`. OCIO Display/View tooling is optional via `.[color]`.
 
 ```bash
 nova-export-render MyProject.nova --output ~/Exports --format openexr_sequence --version 1
+nova-export-render MyProject.nova --output ~/Exports --format scene_openexr_sequence --version 1
 nova-export-render MyProject.nova --output ~/Exports --format rgba_mov --version 1
 nova-export-render MyProject.nova --output ~/Exports --format png_sequence --version 1
 ```

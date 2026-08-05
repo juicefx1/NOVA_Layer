@@ -1,5 +1,8 @@
 .DS_Store
 .venv/
+.venv_release/
+build/
+*.egg-info/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

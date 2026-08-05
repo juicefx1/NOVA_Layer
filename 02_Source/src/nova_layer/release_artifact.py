@@ -26,6 +26,16 @@ EXPECTED_COMMANDS = {
     "nova-release-candidate",
     "nova-release-audit",
     "nova-install-smoke",
+    "nova-skeleton-check",
+    "nova-depth-pose-bridge",
+    "nova-depth-pose-benchmark",
+    "nova-depth-pose-review",
+    "nova-depth-pose-review-assets",
+    "nova-depth-pose-export",
+    "nova-depth-pose-compare",
+    "nova-depth-pose-smoke",
+    "nova-export-render",
+    "nova-host-session",
 }
 
 

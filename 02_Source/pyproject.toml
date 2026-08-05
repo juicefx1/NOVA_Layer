@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "nova-layer"
 version = "1.0.0rc1"
 description = "NOVA Layer Phase 1 vertical slice"
+readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "pydantic>=2.10,<3",
@@ -44,6 +45,7 @@ desktop = [
   "av>=14,<19",
   "numpy>=2.1,<3",
   "OpenEXR>=3.3,<4",
+  "pillow>=11,<13",
 ]
 dev = [
   "mypy>=1.14,<2",
@@ -60,9 +62,28 @@ ai = [
 color = [
   "opencolorio>=2.3,<3",
 ]
+# Scene Linear (True Scene) EXR decode. PyPI wheels are not available on every
+# platform (notably many macOS/arm64 setups); install system OpenImageIO or use
+# conda when `pip install 'nova-layer[oiio]'` cannot resolve a wheel.
+oiio = [
+  "OpenImageIO>=2.5",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nova_layer"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/tests",
+  "/.venv",
+  "/.venv_release",
+  "/tmp",
+  "/dist",
+  "/build",
+  "/.pytest_cache",
+  "/.mypy_cache",
+  "/.ruff_cache",
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true
