@@ -12,6 +12,10 @@ from nova_layer.adapters.media.image_sequence_reader import (
 from nova_layer.adapters.media.media_reader_factory import MediaReaderFactory
 from nova_layer.adapters.persistence.json_store import JsonProjectStore
 from nova_layer.adapters.persistence.mask_store import PngMaskStore
+from nova_layer.adapters.persistence.safe_paths import (
+    UnsafePackagePathError,
+    resolve_within_root,
+)
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.export.smart_layer import (
     FORMAT_LABELS,
@@ -50,9 +54,15 @@ def export_render_from_project(
         raise SmartLayerExportError(f"Smart Layer render v{version} does not exist.")
     for frame in render.frames:
         expected = render.checksums.get(frame.image_reference)
-        source = package_path / frame.image_reference
-        if not source.is_file():
-            raise SmartLayerExportError(f"Rendered frame is missing: {source}")
+        try:
+            source = resolve_within_root(
+                package_path,
+                frame.image_reference,
+                must_exist=True,
+                expect="file",
+            )
+        except UnsafePackagePathError as exc:
+            raise SmartLayerExportError(f"Unsafe render reference: {exc}") from exc
         if expected is not None:
             from hashlib import sha256
 

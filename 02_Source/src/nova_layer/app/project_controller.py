@@ -37,6 +37,10 @@ from nova_layer.adapters.media.pyav_reader import PyAvMediaReader
 from nova_layer.adapters.persistence.json_store import JsonProjectStore, ProjectStoreError
 from nova_layer.adapters.persistence.mask_store import MaskStoreError, PngMaskStore
 from nova_layer.adapters.persistence.preview_store import PngPreviewStore, PreviewStoreError
+from nova_layer.adapters.persistence.safe_paths import (
+    UnsafePackagePathError,
+    resolve_within_root,
+)
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.color_pipeline_diagnostics import (
     ColorPipelineDiagnostics,
@@ -1751,8 +1755,14 @@ class ProjectController(QObject):
                     complete=False,
                 )
                 return []
-            mask_path = self._package_path / result.mask_reference
-            if not mask_path.is_file():
+            try:
+                mask_path = resolve_within_root(
+                    self._package_path,
+                    result.mask_reference,
+                    must_exist=True,
+                    expect="file",
+                )
+            except UnsafePackagePathError:
                 self.error_occurred.emit(
                     f"Propagated mask was not materialized on disk: {result.mask_reference}"
                 )
@@ -1767,6 +1777,7 @@ class ProjectController(QObject):
                     complete=False,
                 )
                 return []
+            del mask_path
             materialized += 1
             if not result.is_validation_target:
                 continue
@@ -1803,8 +1814,15 @@ class ProjectController(QObject):
         )
         # Master confirmed mask must remain present on disk.
         master_ref = layer.object_identity.confirmed_subject_reference
-        if master_ref is None or not (self._package_path / master_ref).is_file():
+        if master_ref is None:
             complete = False
+        else:
+            try:
+                resolve_within_root(
+                    self._package_path, master_ref, must_exist=True, expect="file"
+                )
+            except UnsafePackagePathError:
+                complete = False
             self.error_occurred.emit(
                 "Accepted master-frame mask is missing after propagation. "
                 "Re-accept the hypothesis, then propagate again."
@@ -2184,8 +2202,11 @@ class ProjectController(QObject):
         for frame_number, mask_reference in sources:
             if frame_number < shot.range_start or frame_number > shot.range_end:
                 continue
-            mask_path = self._package_path / mask_reference
-            if not mask_path.is_file():
+            try:
+                resolve_within_root(
+                    self._package_path, mask_reference, must_exist=True, expect="file"
+                )
+            except UnsafePackagePathError:
                 return BackgroundRemovalClipReadiness(
                     False,
                     f"Mask file missing for frame {frame_number} ({mask_reference}). "
@@ -2689,7 +2710,7 @@ class ProjectController(QObject):
             )
             return
         final_relative = f"renders/v{output.render_version:04d}"
-        final_path = self._package_path / final_relative
+        final_path = resolve_within_root(self._package_path, final_relative)
         final_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             output.staging_path.replace(final_path)
@@ -2719,7 +2740,14 @@ class ProjectController(QObject):
             frame_end=frames[-1].frame_number,
             frames=frames,
             checksums={
-                item.image_reference: self._sha256(self._package_path / item.image_reference)
+                item.image_reference: self._sha256(
+                    resolve_within_root(
+                        self._package_path,
+                        item.image_reference,
+                        must_exist=True,
+                        expect="file",
+                    )
+                )
                 for item in frames
             },
         )
@@ -2768,11 +2796,17 @@ class ProjectController(QObject):
         if not render.checksums:
             issues.append("Render predates checksum metadata and must be regenerated.")
         for frame in render.frames:
-            path = self._package_path / frame.image_reference
-            expected = render.checksums.get(frame.image_reference)
-            if not path.is_file():
-                issues.append(f"Missing frame: {frame.image_reference}")
+            try:
+                path = resolve_within_root(
+                    self._package_path,
+                    frame.image_reference,
+                    must_exist=True,
+                    expect="file",
+                )
+            except UnsafePackagePathError:
+                issues.append(f"Unsafe or missing frame: {frame.image_reference}")
                 continue
+            expected = render.checksums.get(frame.image_reference)
             checked += 1
             if expected is None:
                 issues.append(f"Missing checksum: {frame.image_reference}")
@@ -2852,11 +2886,18 @@ class ProjectController(QObject):
             self.error_occurred.emit(f"Smart Layer render v{version} does not exist.")
             return None
         integrity = self.verify_smart_layer_render(version)
-        storage_bytes = sum(
-            path.stat().st_size
-            for frame in render.frames
-            if (path := self._package_path / frame.image_reference).is_file()
-        )
+        storage_bytes = 0
+        for frame in render.frames:
+            try:
+                path = resolve_within_root(
+                    self._package_path,
+                    frame.image_reference,
+                    must_exist=True,
+                    expect="file",
+                )
+            except UnsafePackagePathError:
+                continue
+            storage_bytes += path.stat().st_size
         return RenderAuditReport(
             version=render.version,
             source_layer_version=render.source_layer_version,
@@ -2893,9 +2934,23 @@ class ProjectController(QObject):
             self.error_occurred.emit("Render assets do not share a safe version directory.")
             return False
         relative_directory = relative_directories.pop()
-        render_path = (self._package_path / relative_directory).resolve()
-        renders_root = (self._package_path / "renders").resolve()
-        if render_path.parent != renders_root or not render_path.is_dir():
+        try:
+            render_path = resolve_within_root(
+                self._package_path,
+                relative_directory.as_posix(),
+                must_exist=True,
+                expect="dir",
+            )
+            renders_root = resolve_within_root(
+                self._package_path,
+                "renders",
+                must_exist=True,
+                expect="dir",
+            )
+        except UnsafePackagePathError:
+            self.error_occurred.emit("Render version directory is missing or unsafe to delete.")
+            return False
+        if render_path.parent != renders_root:
             self.error_occurred.emit("Render version directory is missing or unsafe to delete.")
             return False
 
@@ -3332,7 +3387,11 @@ class ProjectController(QObject):
             )
         for frame_number in expected:
             reference = by_frame[frame_number]
-            if not (self._package_path / reference).is_file():
+            try:
+                resolve_within_root(
+                    self._package_path, reference, must_exist=True, expect="file"
+                )
+            except UnsafePackagePathError:
                 return (
                     False,
                     f"mask file missing for frame {frame_number} ({reference}). "

@@ -14,6 +14,13 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
+from nova_layer.adapters.persistence.safe_paths import (
+    UnsafePackagePathError,
+    assert_path_within_root,
+    resolve_within_root,
+    sanitize_export_stem,
+    sanitize_path_segment,
+)
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.domain.models import SmartLayerRender
 from nova_layer.export.scene_exr import (
@@ -79,6 +86,34 @@ class SmartLayerExportResult:
 
 class SmartLayerExportError(RuntimeError):
     """Raised when a Smart Layer production export cannot be completed."""
+
+
+def _package_render_file(package_path: Path, image_reference: str) -> Path:
+    try:
+        return resolve_within_root(
+            package_path,
+            image_reference,
+            must_exist=True,
+            expect="file",
+        )
+    except UnsafePackagePathError as exc:
+        raise SmartLayerExportError(f"Unsafe render reference: {exc}") from exc
+
+
+def _staging_child(staging_path: Path, name: str) -> Path:
+    try:
+        safe_name = sanitize_path_segment(name, field="export filename")
+        return resolve_within_root(staging_path, safe_name)
+    except UnsafePackagePathError as exc:
+        raise SmartLayerExportError(f"Unsafe export filename: {exc}") from exc
+
+
+def _safe_rmtree_within(root: Path, target: Path) -> None:
+    try:
+        contained = assert_path_within_root(root, target, label="export staging")
+    except UnsafePackagePathError:
+        return
+    rmtree(contained, ignore_errors=True)
 
 
 def load_rgba_png(path: Path) -> NDArray[np.uint8]:
@@ -183,10 +218,23 @@ def export_smart_layer_assets(
 ) -> SmartLayerExportResult:
     if not destination_directory.is_dir():
         raise SmartLayerExportError("Choose an existing export destination directory.")
-    export_path = destination_directory / export_stem
+    try:
+        destination_root = destination_directory.expanduser().resolve(strict=False)
+        safe_stem = sanitize_export_stem(export_stem)
+    except (OSError, UnsafePackagePathError) as exc:
+        raise SmartLayerExportError(f"Invalid export destination: {exc}") from exc
+    export_path = destination_root / safe_stem
+    try:
+        assert_path_within_root(destination_root, export_path, label="export path")
+    except UnsafePackagePathError as exc:
+        raise SmartLayerExportError(str(exc)) from exc
     if export_path.exists():
         raise SmartLayerExportError(f"Export destination already exists: {export_path}")
-    staging_path = destination_directory / f".{export_stem}.staging_{uuid4().hex}"
+    staging_name = f".{safe_stem}.staging_{uuid4().hex}"
+    try:
+        staging_path = resolve_within_root(destination_root, staging_name)
+    except UnsafePackagePathError as exc:
+        raise SmartLayerExportError(str(exc)) from exc
     try:
         staging_path.mkdir()
         exported_files: list[dict[str, Any]] = []
@@ -196,10 +244,8 @@ def export_smart_layer_assets(
         header_warnings: list[str] | None = None
         if format is ExportFormat.PNG_SEQUENCE:
             for frame in render.frames:
-                source = package_path / frame.image_reference
-                if not source.is_file():
-                    raise FileNotFoundError(f"Rendered frame is missing: {source}")
-                destination = staging_path / source.name
+                source = _package_render_file(package_path, frame.image_reference)
+                destination = _staging_child(staging_path, source.name)
                 copy2(source, destination)
                 exported_files.append(
                     {
@@ -210,11 +256,11 @@ def export_smart_layer_assets(
                 )
         elif format is ExportFormat.OPENEXR_SEQUENCE:
             for frame in render.frames:
-                source = package_path / frame.image_reference
-                if not source.is_file():
-                    raise FileNotFoundError(f"Rendered frame is missing: {source}")
+                source = _package_render_file(package_path, frame.image_reference)
                 rgba = load_rgba_png(source)
-                destination = staging_path / f"frame_{frame.frame_number:06d}.exr"
+                destination = _staging_child(
+                    staging_path, f"frame_{frame.frame_number:06d}.exr"
+                )
                 write_openexr_rgba(destination, rgba)
                 exported_files.append(
                     {
@@ -226,12 +272,10 @@ def export_smart_layer_assets(
         elif format is ExportFormat.RGBA_MOV:
             rgba_frames: list[NDArray[np.uint8]] = []
             for frame in render.frames:
-                source = package_path / frame.image_reference
-                if not source.is_file():
-                    raise FileNotFoundError(f"Rendered frame is missing: {source}")
+                source = _package_render_file(package_path, frame.image_reference)
                 rgba_frames.append(load_rgba_png(source))
-            movie_name = f"{export_stem}.mov"
-            destination = staging_path / movie_name
+            movie_name = f"{safe_stem}.mov"
+            destination = _staging_child(staging_path, movie_name)
             write_rgba_mov(destination, rgba_frames, frame_rate=frame_rate)
             exported_files.append(
                 {
@@ -324,13 +368,14 @@ def export_smart_layer_assets(
                 manifest["scene_linear"] = resolved_policy.get("scene_linear", False)
                 if resolved_policy.get("pixel_encoding") is not None:
                     manifest["pixel_encoding"] = resolved_policy.get("pixel_encoding")
-        (staging_path / "manifest.json").write_text(
+        manifest_path = _staging_child(staging_path, "manifest.json")
+        manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         staging_path.replace(export_path)
     except Exception:
-        rmtree(staging_path, ignore_errors=True)
+        _safe_rmtree_within(destination_root, staging_path)
         raise
     return SmartLayerExportResult(
         path=export_path,
@@ -456,7 +501,7 @@ def _export_scene_openexr_sequence(
             raise SmartLayerExportError(str(exc)) from exc
         # Drop scene reference before next decode so only RGBA + mask live briefly.
         del scene
-        destination = staging_path / f"frame_{frame.frame_number:06d}.exr"
+        destination = _staging_child(staging_path, f"frame_{frame.frame_number:06d}.exr")
         assert header_template is not None
         frame_metadata = header_template.with_frame_number(frame.frame_number)
         try:
@@ -507,8 +552,20 @@ def _load_sidecar_color_policy(
 ) -> dict[str, Any] | None:
     if not render.frames:
         return None
-    parent = package_path / Path(render.frames[0].image_reference).parent
-    path = parent / "color_policy.json"
+    try:
+        frame_path = resolve_within_root(
+            package_path,
+            render.frames[0].image_reference,
+            must_exist=False,
+            expect="file",
+        )
+        # Parent of a contained file is still under package (assert again).
+        parent = assert_path_within_root(
+            package_path, frame_path.parent, label="render directory"
+        )
+        path = resolve_within_root(parent, "color_policy.json", must_exist=False)
+    except UnsafePackagePathError:
+        return None
     if not path.is_file():
         return None
     try:

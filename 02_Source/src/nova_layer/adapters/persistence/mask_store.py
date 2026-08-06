@@ -6,6 +6,11 @@ import numpy as np
 from numpy.typing import NDArray
 from PySide6.QtGui import QImage
 
+from nova_layer.adapters.persistence.safe_paths import (
+    UnsafePackagePathError,
+    resolve_within_root,
+)
+
 
 class MaskStoreError(RuntimeError):
     pass
@@ -13,7 +18,10 @@ class MaskStoreError(RuntimeError):
 
 class PngMaskStore:
     def save(self, package_path: Path, relative_path: str, mask: NDArray[np.uint8]) -> Path:
-        destination = package_path / relative_path
+        try:
+            destination = resolve_within_root(package_path, relative_path)
+        except UnsafePackagePathError as exc:
+            raise MaskStoreError(str(exc)) from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
         contiguous = np.ascontiguousarray(mask)
         height, width = contiguous.shape
@@ -29,7 +37,15 @@ class PngMaskStore:
         return destination
 
     def load(self, package_path: Path, relative_path: str) -> NDArray[np.uint8]:
-        source = package_path / relative_path
+        try:
+            source = resolve_within_root(
+                package_path,
+                relative_path,
+                must_exist=True,
+                expect="file",
+            )
+        except UnsafePackagePathError as exc:
+            raise MaskStoreError(str(exc)) from exc
         image = QImage(str(source))
         if image.isNull():
             raise MaskStoreError(f"Could not load mask: {source}")

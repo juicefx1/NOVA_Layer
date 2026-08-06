@@ -14,6 +14,11 @@ from nova_layer.adapters.color.display_transform import (
     DisplayTransformDiagnostics,
     DisplayTransformProtocol,
 )
+from nova_layer.adapters.persistence.safe_paths import (
+    UnsafePackagePathError,
+    assert_path_within_root,
+    resolve_within_root,
+)
 from nova_layer.app.processing_frames import (
     SOURCE_TRANSFORM_VERSION,
     ProcessingColorPolicy,
@@ -116,9 +121,19 @@ def load_render_color_metadata(
 ) -> dict[str, Any] | None:
     if not render.frames:
         return None
-    relative = Path(render.frames[0].image_reference)
-    parent = package_path / relative.parent
-    path = parent / RENDER_COLOR_POLICY_FILENAME
+    try:
+        frame_path = resolve_within_root(
+            package_path,
+            render.frames[0].image_reference,
+            must_exist=False,
+            expect="file",
+        )
+        parent = assert_path_within_root(
+            package_path, frame_path.parent, label="render directory"
+        )
+        path = resolve_within_root(parent, RENDER_COLOR_POLICY_FILENAME, must_exist=False)
+    except UnsafePackagePathError:
+        return None
     if not path.is_file():
         return None
     try:
