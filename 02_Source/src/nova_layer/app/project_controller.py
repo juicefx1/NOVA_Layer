@@ -52,7 +52,12 @@ from nova_layer.app.false_color import (
     get_false_color_frame_for_decoder,
 )
 from nova_layer.app.histogram_analysis import FrameHistogram, get_frame_histogram_for_decoder
-from nova_layer.app.job_service import JobResult, ProcessingJobService, ProgressCallback
+from nova_layer.app.job_service import (
+    DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    JobResult,
+    ProcessingJobService,
+    ProgressCallback,
+)
 from nova_layer.app.maturity import MaturityPromotionError, promote_to_production_ready
 from nova_layer.app.pixel_inspection import PixelInspection, inspect_pixel
 from nova_layer.app.preview_extraction import compose_rgba
@@ -331,10 +336,13 @@ class ProjectController(QObject):
         self._sam_processing_profile = SamProcessingProfile()
         self._last_sam_input_diagnostics: ProcessingInputDiagnostics | None = None
 
-    def shutdown(self) -> None:
-        """Cancel active processing (including export) before teardown."""
-        if self._jobs.is_running:
-            self._jobs.cancel()
+    def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
+        """Cancel active processing and wait briefly for the worker pool to drain.
+
+        Returns True when no job remains active. Returns False on timeout
+        (caller should keep the UI open / retry). Idempotent.
+        """
+        return self._jobs.shutdown(timeout_ms=timeout_ms)
 
     @property
     def project(self) -> Project | None:

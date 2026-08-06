@@ -1867,7 +1867,15 @@ class WorkspaceWindow(QMainWindow):
         self.statusBar().showMessage("Refine Artist Guidance and generate again")
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        self.controller.shutdown()
+        # Cancel background processing and wait briefly. On timeout keep the
+        # window open so the worker can finish (no forced teardown this phase).
+        if not self.controller.shutdown(timeout_ms=5_000):
+            self.statusBar().showMessage(
+                "A background job is still cancelling — try closing again in a moment.",
+                8_000,
+            )
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def _update_guidance_summary(

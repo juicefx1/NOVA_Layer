@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Event
 from typing import TypeVar
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QRunnable, QThreadPool, Signal
 
 ResultT = TypeVar("ResultT")
 ProgressCallback = Callable[[int, int, str], None]
 JobOperation = Callable[[Event, ProgressCallback], ResultT]
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +37,7 @@ class JobWorker[ResultT](QRunnable):
         self.operation = operation
         self.cancel_event = cancel_event
         self.signals = JobWorkerSignals()
+        self.setAutoDelete(True)
 
     def run(self) -> None:
         def report(current: int, total: int, message: str) -> None:
@@ -57,16 +63,31 @@ class ProcessingJobService(QObject):
 
     def __init__(self, thread_pool: QThreadPool | None = None) -> None:
         super().__init__()
-        self._thread_pool = thread_pool or QThreadPool.globalInstance()
+        # Prefer a dedicated pool so shutdown waitForDone() does not block on
+        # unrelated globalInstance work.
+        self._owns_pool = thread_pool is None
+        self._thread_pool = thread_pool or QThreadPool()
+        if self._owns_pool:
+            self._thread_pool.setMaxThreadCount(1)
+            self._thread_pool.setObjectName("novaProcessingJobPool")
         self._worker: JobWorker[object] | None = None
         self._cancel_event: Event | None = None
+        self._shutting_down = False
 
     @property
     def is_running(self) -> bool:
         return self._worker is not None
 
+    @property
+    def is_shutting_down(self) -> bool:
+        return self._shutting_down
+
+    @property
+    def thread_pool(self) -> QThreadPool:
+        return self._thread_pool
+
     def start(self, name: str, operation: JobOperation[object]) -> bool:
-        if self.is_running:
+        if self._shutting_down or self.is_running:
             return False
         cancel_event = Event()
         worker = JobWorker(name, operation, cancel_event)
@@ -86,17 +107,48 @@ class ProcessingJobService(QObject):
         self._cancel_event.set()
         return True
 
+    def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
+        """Cancel any active job and wait up to ``timeout_ms`` for the pool to drain.
+
+        Returns True when no job remains active after the wait (including when none
+        was running). Returns False on timeout without forcing a kill.
+        """
+        self._shutting_down = True
+        if not self.is_running:
+            return True
+        self.cancel()
+        finished = self._thread_pool.waitForDone(max(0, int(timeout_ms)))
+        # Worker completion signals are queued to this thread — flush them so
+        # _clear_active runs before we return to closeEvent callers.
+        QCoreApplication.processEvents()
+        if finished:
+            self._clear_active()
+            return True
+        logger.warning(
+            "ProcessingJobService shutdown timed out after %sms (job still active).",
+            timeout_ms,
+        )
+        return not self.is_running and self._thread_pool.activeThreadCount() == 0
+
     def _completed(self, result: JobResult[object]) -> None:
+        if self._worker is None and not self._shutting_down:
+            return
         self._clear_active()
-        self.completed.emit(result)
+        if not self._shutting_down:
+            self.completed.emit(result)
 
     def _cancelled(self, name: str) -> None:
+        if self._worker is None and not self._shutting_down:
+            return
         self._clear_active()
         self.cancelled.emit(name)
 
     def _failed(self, name: str, message: str) -> None:
+        if self._worker is None and not self._shutting_down:
+            return
         self._clear_active()
-        self.failed.emit(name, message)
+        if not self._shutting_down:
+            self.failed.emit(name, message)
 
     def _clear_active(self) -> None:
         self._worker = None

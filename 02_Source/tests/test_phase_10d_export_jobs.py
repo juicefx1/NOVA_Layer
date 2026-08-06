@@ -439,5 +439,5 @@ def test_shutdown_cancels_running_export(
     with qtbot.waitSignal(controller.processing_cancelled, timeout=5000):  # type: ignore[attr-defined]
         assert controller.start_smart_layer_export(dest, version=1)
         assert started.wait(timeout=2)
-        controller.shutdown()
+        assert controller.shutdown(timeout_ms=5000) is True
     assert not controller._jobs.is_running
