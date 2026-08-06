@@ -163,12 +163,13 @@ Seal a release candidate only after Wheel and Phase 1 acceptance verification:
 
 ```bash
 nova-release-candidate \
-  ../07_Build/wheels/nova_layer-0.1.4-py3-none-any.whl \
-  ../07_Build/reports/nova_layer-0.1.4-wheel.json \
-  ../07_Build/reports/nova_layer-0.1.4-install-smoke.json \
+  ../07_Build/wheels/nova_layer-1.0.0rc1-py3-none-any.whl \
+  ../07_Build/reports/nova_layer-1.0.0rc1-wheel.json \
+  ../07_Build/reports/nova_layer-1.0.0rc1-install-smoke.json \
   ../06_Test/reports/phase1_acceptance_latest.json \
   --release-root ../08_Release
 ```
+
 
 The release directory is content-addressed and immutable. A format-v2 candidate requires a valid
 Wheel report, a passing installation-smoke report bound to the same Wheel SHA-256, and fully
@@ -189,9 +190,10 @@ an older immutable release.
 Smoke-test the installed Wheel in an isolated temporary target:
 
 ```bash
-nova-install-smoke ../07_Build/wheels/nova_layer-0.1.4-py3-none-any.whl \
-  --report ../07_Build/reports/nova_layer-0.1.4-install-smoke.json
+nova-install-smoke ../07_Build/wheels/nova_layer-1.0.0rc1-py3-none-any.whl \
+  --report ../07_Build/reports/nova_layer-1.0.0rc1-install-smoke.json
 ```
+
 
 The smoke test installs only the target Wheel, confirms imports resolve from that installation,
 runs `--help` for every non-GUI command declared inside that exact Wheel, and imports the GUI entry

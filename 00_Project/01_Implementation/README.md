@@ -171,6 +171,13 @@ RV, optional oiiotool / Nuke / DJV). Covers Scene Linear vs Current Render Look,
 inference caveat, privacy/sanitization, CI skip policy, and untracked fixture
 rules. Pixel contracts remain in `COLOR_PIPELINE.md`.
 
+### RELEASE_NOTES_v1.0.0rc1.md
+
+Release candidate notes for package version `1.0.0rc1` (tag `v1.0.0rc1`): color
+pipeline, viewer QA tools, Scene Linear EXR, reliability/security, packaging,
+known limitations, and test status. Distinguishes Current Render Look EXR from
+Scene Linear EXR and notes that the older tag `v1.0.0-rc1` is not this RC.
+
 ### 04_PROJECT_STRUCTURE.md
 
 **Superseded** as an architecture specification. Retained as a historical
