@@ -46,6 +46,9 @@ from nova_layer.app.color_pipeline_diagnostics import (
     ColorPipelineDiagnostics,
     build_color_pipeline_diagnostics,
 )
+from nova_layer.app.depth_analysis import DepthAnalysisService
+from nova_layer.app.depth_frame_cache import DepthFrameCache
+from nova_layer.app.frame_cache_stats import FrameCacheStats
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.false_color import (
     FalseColorMode,
@@ -134,6 +137,12 @@ from nova_layer.ports.capabilities import (
     TemporalPropagationCapability,
     VideoFrame,
 )
+from nova_layer.ports.depth import (
+    DepthAnalysisCancelled,
+    DepthAnalysisCapability,
+    DepthAnalysisError,
+    DepthFrame,
+)
 from nova_layer.ports.media import MediaReadError, MediaReader
 
 
@@ -142,6 +151,14 @@ class HypothesisJobOutput:
     shot_id: UUID
     master_frame: int
     result: SegmentationResult
+
+
+@dataclass(frozen=True, slots=True)
+class DepthAnalysisJobOutput:
+    shot_id: UUID
+    frame_number: int
+    media_fingerprint: str
+    depth_frame: DepthFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +306,10 @@ class ProjectController(QObject):
     project_migrated = Signal(object)
     frame_ready = Signal(int, object)
     error_occurred = Signal(str)
+    depth_analysis_started = Signal(int)
+    depth_analysis_ready = Signal(object)
+    depth_analysis_failed = Signal(str)
+    depth_analysis_cancelled = Signal()
 
     def __init__(
         self,
@@ -301,6 +322,7 @@ class ProjectController(QObject):
         mask_store: PngMaskStore | None = None,
         preview_store: PngPreviewStore | None = None,
         display_transform: DisplayTransformProtocol | None = None,
+        depth_analysis: DepthAnalysisCapability | None = None,
     ) -> None:
         super().__init__()
         self._store = store or JsonProjectStore()
@@ -324,7 +346,7 @@ class ProjectController(QObject):
         self._jobs.started.connect(self.processing_started)
         self._jobs.progress.connect(self.processing_progress)
         self._jobs.completed.connect(self._job_completed)
-        self._jobs.cancelled.connect(self.processing_cancelled)
+        self._jobs.cancelled.connect(self._job_cancelled)
         self._jobs.failed.connect(self._job_failed)
         self._project: Project | None = None
         self._package_path: Path | None = None
@@ -335,6 +357,18 @@ class ProjectController(QObject):
         self._last_render_color_policy: str | None = None
         self._sam_processing_profile = SamProcessingProfile()
         self._last_sam_input_diagnostics: ProcessingInputDiagnostics | None = None
+        self._depth_capability = depth_analysis
+        self._depth_cache = DepthFrameCache()
+        self._depth_service: DepthAnalysisService | None = (
+            DepthAnalysisService(
+                frame_decoder=self._frame_decoder,
+                capability=depth_analysis,
+                cache=self._depth_cache,
+            )
+            if depth_analysis is not None
+            else None
+        )
+        self._last_depth_frame: DepthFrame | None = None
 
     def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
         """Cancel active processing and wait briefly for the worker pool to drain.
@@ -581,6 +615,105 @@ class ProjectController(QObject):
     def last_sam_input_diagnostics(self) -> ProcessingInputDiagnostics | None:
         return self._last_sam_input_diagnostics
 
+    @property
+    def last_depth_frame(self) -> DepthFrame | None:
+        return self._last_depth_frame
+
+    @property
+    def depth_cache_stats(self) -> FrameCacheStats | None:
+        if self._depth_service is None and self._depth_capability is None:
+            return None
+        return self._depth_cache.stats()
+
+    def start_depth_analysis(self, frame_number: int | None = None) -> bool:
+        """Analyze one SOURCE frame into a DepthFrame (async). Depth is not a matte."""
+        if self._depth_service is None or self._depth_capability is None:
+            message = "Depth analysis is unavailable."
+            self.error_occurred.emit(message)
+            self.depth_analysis_failed.emit(message)
+            return False
+        shot = self.active_shot
+        if shot is None or shot.media.source_path is None:
+            message = "Import media before analyzing depth."
+            self.error_occurred.emit(message)
+            self.depth_analysis_failed.emit(message)
+            return False
+        if shot.media.link_state != MediaLinkState.LINKED:
+            message = "Relink source media before analyzing depth."
+            self.error_occurred.emit(message)
+            self.depth_analysis_failed.emit(message)
+            return False
+
+        # Snapshot analyze target immediately so scrubbing cannot retarget the job.
+        if frame_number is None:
+            if self._preview_frame_number is not None:
+                target_frame = int(self._preview_frame_number)
+            else:
+                target_frame = int(shot.master_frame)
+        else:
+            target_frame = int(frame_number)
+
+        if target_frame < shot.range_start or target_frame > shot.range_end:
+            message = "Depth analysis frame is outside the Shot Range."
+            self.error_occurred.emit(message)
+            self.depth_analysis_failed.emit(message)
+            return False
+
+        media_path = Path(shot.media.source_path)
+        media_fingerprint = str(shot.media.fingerprint)
+        shot_id = shot.id
+        service = self._depth_service
+
+        def operation(cancel_event: Event, report: ProgressCallback) -> object:
+            report(0, 3, f"Analyzing depth · frame {target_frame}")
+            try:
+                depth_frame = service.analyze(
+                    media_path=media_path,
+                    media_fingerprint=media_fingerprint,
+                    frame_number=target_frame,
+                    should_cancel=cancel_event.is_set,
+                )
+            except DepthAnalysisCancelled:
+                cancel_event.set()
+                return None
+            except DepthAnalysisError:
+                if cancel_event.is_set():
+                    return None
+                raise
+            report(3, 3, "Depth analysis ready")
+            if cancel_event.is_set():
+                return None
+            return DepthAnalysisJobOutput(
+                shot_id=shot_id,
+                frame_number=target_frame,
+                media_fingerprint=media_fingerprint,
+                depth_frame=depth_frame,
+            )
+
+        if not self._jobs.start("depth_analysis", operation):
+            self.error_occurred.emit("Another processing job is already running.")
+            return False
+        self.depth_analysis_started.emit(target_frame)
+        return True
+
+    def cancel_depth_analysis(self) -> bool:
+        """Cancel a running depth analysis job (or the active processing job)."""
+        return self._jobs.cancel()
+
+    def _rebind_depth_service(self) -> None:
+        if self._depth_capability is None:
+            self._depth_service = None
+            return
+        self._depth_service = DepthAnalysisService(
+            frame_decoder=self._frame_decoder,
+            capability=self._depth_capability,
+            cache=self._depth_cache,
+        )
+
+    def _reset_depth_ephemeral(self) -> None:
+        self._depth_cache.clear()
+        self._last_depth_frame = None
+
     def create_project(self, name: str, parent_directory: Path) -> Project | None:
         clean_name = name.strip()
         if not clean_name:
@@ -601,6 +734,7 @@ class ProjectController(QObject):
 
         self._project = project
         self._package_path = package_path
+        self._reset_depth_ephemeral()
         self.project_changed.emit(project)
         return project
 
@@ -626,12 +760,14 @@ class ProjectController(QObject):
         )
         self._frame_decoder.frame_ready.connect(self.frame_ready)
         self._frame_decoder.error_occurred.connect(self.error_occurred)
+        self._rebind_depth_service()
 
     def import_media(self, media_path: Path) -> Shot | None:
         if self._project is None or self._package_path is None:
             self.error_occurred.emit("Create or open a project before importing media.")
             return None
         self._set_media_reader(media_path)
+        self._reset_depth_ephemeral()
 
         try:
             info = self._media_reader.inspect(media_path)
@@ -725,6 +861,7 @@ class ProjectController(QObject):
         shot.media.pixel_format = info.pixel_format
         shot.media.link_state = MediaLinkState.LINKED
         self._frame_decoder.clear()
+        self._reset_depth_ephemeral()
         if not self._save_current():
             return False
         self.media_link_state_changed.emit(MediaLinkState.LINKED.value, "Source media relinked.")
@@ -2547,7 +2684,31 @@ class ProjectController(QObject):
             export_path = cast(Path | str | None, result.value)
             if export_path is not None:
                 self.smart_layer_export_ready.emit(str(export_path))
+        elif result.name == "depth_analysis":
+            depth_output = cast(DepthAnalysisJobOutput | None, result.value)
+            if depth_output is not None:
+                self._commit_depth_analysis(depth_output)
         self.processing_finished.emit(result.name)
+
+    def _commit_depth_analysis(self, output: DepthAnalysisJobOutput) -> None:
+        shot = self.active_shot
+        if shot is None or shot.id != output.shot_id:
+            self.error_occurred.emit(
+                "Shot state changed during depth analysis; the result was discarded."
+            )
+            return
+        if str(shot.media.fingerprint) != str(output.media_fingerprint):
+            self.error_occurred.emit(
+                "Media identity changed during depth analysis; the result was discarded."
+            )
+            return
+        self._last_depth_frame = output.depth_frame
+        self.depth_analysis_ready.emit(output.depth_frame)
+
+    def _job_cancelled(self, name: str) -> None:
+        self.processing_cancelled.emit(name)
+        if name == "depth_analysis":
+            self.depth_analysis_cancelled.emit()
 
     def _commit_skeleton_fusion_detection(
         self,
@@ -3261,6 +3422,12 @@ class ProjectController(QObject):
             ) from exc
 
     def _job_failed(self, name: str, message: str) -> None:
+        if name == "depth_analysis":
+            detail = f"Depth analysis failed: {message}"
+            self.error_occurred.emit(detail)
+            self.processing_failed.emit(name, detail)
+            self.depth_analysis_failed.emit(detail)
+            return
         if name == "skeleton_fusion_detection":
             if "no semantic labels matching" in message:
                 detail = (
@@ -3601,6 +3768,7 @@ class ProjectController(QObject):
 
         self._project = project
         self._package_path = package_path.resolve()
+        self._reset_depth_ephemeral()
         self.project_changed.emit(project)
         if self._store.last_migration_steps:
             self.project_migrated.emit(list(self._store.last_migration_steps))
