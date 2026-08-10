@@ -1,0 +1,836 @@
+{
+  "generated_at": "2026-08-10T06:10:55.854409+00:00",
+  "device": "mps",
+  "default_tolerance": 0.08,
+  "performance": {
+    "first_load_plus_infer_ms": 2764.2106659986894,
+    "warm_infer_ms_1080p": 199.49845899827778,
+    "warm_infer_ms_4k_proxy": 225.80170900619123,
+    "warmup_resolution": [
+      1280,
+      720
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "case01_person_fg",
+      "scenario": "1_single_person_fg",
+      "media": "tmp/depth_assist_d36/frames/case01_person_fg.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 181.60429199633654,
+      "depth_region_coverage": 0.028154296875,
+      "depth_bbox_area_norm": 0.051064453125,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 7.27333299437305,
+      "sam_latency_depth_ms": 11.274917000264395,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Person-like plate frame",
+      "proxy_level": "real",
+      "extra": {
+        "seed": [
+          959,
+          296
+        ],
+        "effective_band": 0.3737880265712738,
+        "region_pixels": 25947
+      }
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "scenario": "2_person_chair_same_depth",
+      "media": "tmp/depth_assist_d36/frames/case02_person_chair_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 187.96091600233922,
+      "depth_region_coverage": 0.011163194444444444,
+      "depth_bbox_area_norm": 0.020286458333333333,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 9.378082999319304,
+      "sam_latency_depth_ms": 13.921709003625438,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Frame proxy for person+furniture depth merge risk",
+      "proxy_level": "real_proxy",
+      "extra": {
+        "seed": [
+          902,
+          393
+        ],
+        "effective_band": 0.37024624943733214,
+        "region_pixels": 10288
+      }
+    },
+    {
+      "case_id": "case03_prop_object",
+      "scenario": "3_foreground_prop",
+      "media": "tmp/depth_assist_d36/frames/case03_prop_object.png",
+      "frame_number": 0,
+      "resolution": [
+        640,
+        360
+      ],
+      "device": "mps",
+      "depth_latency_ms": 198.91404199734097,
+      "depth_region_coverage": 0.08475694444444444,
+      "depth_bbox_area_norm": 0.35,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 1.9789580037468113,
+      "sam_latency_depth_ms": 5.685625001206063,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "QA fixture mid frame prop/object",
+      "proxy_level": "fixture_proxy",
+      "extra": {
+        "seed": [
+          297,
+          215
+        ],
+        "effective_band": 0.46180397033691406,
+        "region_pixels": 19528
+      }
+    },
+    {
+      "case_id": "case04_overlap_proxy",
+      "scenario": "4_overlapping_subjects",
+      "media": "tmp/depth_assist_d36/frames/case04_overlap_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 187.05858400062425,
+      "depth_region_coverage": 0.007537977430555555,
+      "depth_bbox_area_norm": 0.01032986111111111,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 4,
+      "delta_interactions": 2,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 1,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": false,
+      "sam_latency_manual_ms": 7.904625002993271,
+      "sam_latency_depth_ms": 29.990998998982832,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Later frame; may include overlap",
+      "proxy_level": "real_proxy",
+      "extra": {
+        "seed": [
+          701,
+          431
+        ],
+        "effective_band": 0.4328080749511719,
+        "region_pixels": 6947
+      }
+    },
+    {
+      "case_id": "case05_limbs_proxy",
+      "scenario": "5_hair_limbs_thin",
+      "media": "tmp/depth_assist_d36/frames/case05_limbs_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 196.1344579976867,
+      "depth_region_coverage": 0.014870876736111111,
+      "depth_bbox_area_norm": 0.021484375,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 7.223542001156602,
+      "sam_latency_depth_ms": 11.199291002412792,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Thin-structure risk frame",
+      "proxy_level": "real_proxy",
+      "extra": {
+        "seed": [
+          604,
+          431
+        ],
+        "effective_band": 0.45643150329589843,
+        "region_pixels": 13705
+      }
+    },
+    {
+      "case_id": "case06_reflective_proxy",
+      "scenario": "6_reflective",
+      "media": "tmp/depth_assist_d36/frames/case06_reflective_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        2506,
+        902
+      ],
+      "device": "mps",
+      "depth_latency_ms": 576.7042919978849,
+      "depth_region_coverage": 0.092560559756363,
+      "depth_bbox_area_norm": 0.188470066518847,
+      "generated_positive": 4,
+      "generated_negative": 3,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 21.45383299648529,
+      "sam_latency_depth_ms": 27.361000000382774,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "UI screenshot/reflective proxy",
+      "proxy_level": "fixture_proxy",
+      "extra": {
+        "seed": [
+          1878,
+          180
+        ],
+        "effective_band": 0.17230381011962892,
+        "region_pixels": 209225
+      }
+    },
+    {
+      "case_id": "case07_low_contrast_proxy",
+      "scenario": "7_low_contrast",
+      "media": "tmp/depth_assist_d36/frames/case07_low_contrast_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 211.6100000057486,
+      "depth_region_coverage": 0.02519314236111111,
+      "depth_bbox_area_norm": 0.058402777777777776,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 6.6734580032061785,
+      "sam_latency_depth_ms": 11.727457997039892,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Lower-key frame proxy",
+      "proxy_level": "real_proxy",
+      "extra": {
+        "seed": [
+          959,
+          325
+        ],
+        "effective_band": 0.3662327575683594,
+        "region_pixels": 23218
+      }
+    },
+    {
+      "case_id": "case08_depth_scene_proxy",
+      "scenario": "8_wide_deep_scene",
+      "media": "tmp/depth_assist_d36/frames/case08_depth_scene_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 200.19870800024364,
+      "depth_region_coverage": 0.11205295138888889,
+      "depth_bbox_area_norm": 0.2800238715277778,
+      "generated_positive": 4,
+      "generated_negative": 3,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 8.430624999164138,
+      "sam_latency_depth_ms": 9.221416999935172,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "VFX plate deeper staging proxy",
+      "proxy_level": "real",
+      "extra": {
+        "seed": [
+          320,
+          174
+        ],
+        "effective_band": 0.40173423767089844,
+        "region_pixels": 103268
+      }
+    },
+    {
+      "case_id": "case09_shallow_dof_proxy",
+      "scenario": "9_shallow_dof",
+      "media": "tmp/depth_assist_d36/frames/case09_shallow_dof_proxy.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 206.71308299642988,
+      "depth_region_coverage": 0.008587239583333333,
+      "depth_bbox_area_norm": 0.04561306423611111,
+      "generated_positive": 4,
+      "generated_negative": 4,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 7.441500005370472,
+      "sam_latency_depth_ms": 13.445209006022196,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Plate edge frame as DOF/soft proxy",
+      "proxy_level": "real_proxy",
+      "extra": {
+        "seed": [
+          320,
+          224
+        ],
+        "effective_band": 0.4398413848876953,
+        "region_pixels": 7914
+      }
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "scenario": "10_vfx_greenscreen_like",
+      "media": "tmp/depth_assist_d36/frames/case10_vfx_plate.png",
+      "frame_number": 0,
+      "resolution": [
+        1280,
+        720
+      ],
+      "device": "mps",
+      "depth_latency_ms": 196.51245800196193,
+      "depth_region_coverage": 0.08840386284722222,
+      "depth_bbox_area_norm": 0.16375542534722223,
+      "generated_positive": 4,
+      "generated_negative": 3,
+      "has_bbox": true,
+      "region_warning": null,
+      "purity_score": 5,
+      "completeness_score": 5,
+      "contamination_score": 1,
+      "manual_interactions": 6,
+      "depth_assist_interactions": 3,
+      "delta_interactions": 3,
+      "manual_refine_rounds": 0,
+      "depth_refine_rounds": 0,
+      "first_pass_accept_manual": true,
+      "first_pass_accept_depth": true,
+      "sam_latency_manual_ms": 7.6606249931501225,
+      "sam_latency_depth_ms": 10.640874999808148,
+      "manual_confidence": 0.99,
+      "depth_confidence": 0.99,
+      "boundary_quality_subjective": 5,
+      "failure_reason": null,
+      "notes": "Publish plate footage",
+      "proxy_level": "real",
+      "extra": {
+        "seed": [
+          486,
+          185
+        ],
+        "effective_band": 0.3957778549194336,
+        "region_pixels": 81473
+      }
+    }
+  ],
+  "tolerance_sweep": [
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.03,
+      "coverage": 0.016223958333333333,
+      "bbox_area_norm": 0.03577473958333333,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 14952
+    },
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.05,
+      "coverage": 0.02261501736111111,
+      "bbox_area_norm": 0.04436848958333333,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 20842
+    },
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.08,
+      "coverage": 0.028154296875,
+      "bbox_area_norm": 0.051064453125,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 25947
+    },
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.1,
+      "coverage": 0.13392686631944445,
+      "bbox_area_norm": 0.36841145833333333,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 123427
+    },
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.15,
+      "coverage": 0.17034722222222223,
+      "bbox_area_norm": 0.38483289930555553,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 156992
+    },
+    {
+      "case_id": "case01_person_fg",
+      "tolerance": 0.2,
+      "coverage": 0.19168294270833333,
+      "bbox_area_norm": 0.39661349826388886,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 176655
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.03,
+      "coverage": 0.002731119791666667,
+      "bbox_area_norm": 0.0040256076388888885,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 2517
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.05,
+      "coverage": 0.007332899305555555,
+      "bbox_area_norm": 0.014740668402777778,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 6758
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.08,
+      "coverage": 0.011163194444444444,
+      "bbox_area_norm": 0.020286458333333333,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 10288
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.1,
+      "coverage": 0.014036458333333333,
+      "bbox_area_norm": 0.025,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 12936
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.15,
+      "coverage": 0.05197265625,
+      "bbox_area_norm": 0.1592795138888889,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 47898
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "tolerance": 0.2,
+      "coverage": 0.07507921006944444,
+      "bbox_area_norm": 0.20006727430555554,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 69193
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.03,
+      "coverage": 0.050345052083333335,
+      "bbox_area_norm": 0.11070421006944445,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 46398
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.05,
+      "coverage": 0.07369357638888889,
+      "bbox_area_norm": 0.14738064236111112,
+      "positives": 4,
+      "negatives": 4,
+      "warning": null,
+      "pixels": 67916
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.08,
+      "coverage": 0.08840386284722222,
+      "bbox_area_norm": 0.16375542534722223,
+      "positives": 4,
+      "negatives": 3,
+      "warning": null,
+      "pixels": 81473
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.1,
+      "coverage": 0.19640516493055554,
+      "bbox_area_norm": 0.8486111111111111,
+      "positives": 4,
+      "negatives": 3,
+      "warning": null,
+      "pixels": 181007
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.15,
+      "coverage": 0.25422092013888886,
+      "bbox_area_norm": 1.0,
+      "positives": 4,
+      "negatives": 2,
+      "warning": null,
+      "pixels": 234290
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "tolerance": 0.2,
+      "coverage": 0.28608506944444445,
+      "bbox_area_norm": 1.0,
+      "positives": 4,
+      "negatives": 2,
+      "warning": null,
+      "pixels": 263656
+    }
+  ],
+  "stability": {
+    "mps": {
+      "min": 0.0,
+      "max": 5.743499755859375,
+      "mean": 1.9852955341339111
+    },
+    "cpu": {
+      "min": 0.0,
+      "max": 5.743495941162109,
+      "mean": 1.9852941036224365
+    },
+    "correlation": 0.9999999999996627,
+    "region_iou": 1.0,
+    "repeat_max_abs_diff": 0.0,
+    "seed": [
+      959,
+      296
+    ]
+  },
+  "guidance_findings": [
+    {
+      "case_id": "case01_person_fg",
+      "fill_ratio": 0.5513482501434309,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.028154296875,
+      "bbox_area": 0.051064453125,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case02_person_chair_proxy",
+      "fill_ratio": 0.5502781343602909,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": true,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.011163194444444444,
+      "bbox_area": 0.020286458333333333,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case03_prop_object",
+      "fill_ratio": 0.2421626984126984,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.08475694444444444,
+      "bbox_area": 0.35,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case04_overlap_proxy",
+      "fill_ratio": 0.7297268907563025,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": true,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.007537977430555555,
+      "bbox_area": 0.01032986111111111,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case05_limbs_proxy",
+      "fill_ratio": 0.6921717171717172,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": true,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.014870876736111111,
+      "bbox_area": 0.021484375,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case06_reflective_proxy",
+      "fill_ratio": 0.4911154405896437,
+      "bbox_too_wide": false,
+      "negative_count": 3,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.092560559756363,
+      "bbox_area": 0.188470066518847,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case07_low_contrast_proxy",
+      "fill_ratio": 0.4313689060642093,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.02519314236111111,
+      "bbox_area": 0.058402777777777776,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case08_depth_scene_proxy",
+      "fill_ratio": 0.40015499670632,
+      "bbox_too_wide": false,
+      "negative_count": 3,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.11205295138888889,
+      "bbox_area": 0.2800238715277778,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case09_shallow_dof_proxy",
+      "fill_ratio": 0.18826272093631802,
+      "bbox_too_wide": false,
+      "negative_count": 4,
+      "positive_count": 4,
+      "negatives_maybe_harsh": true,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.008587239583333333,
+      "bbox_area": 0.04561306423611111,
+      "warning": null,
+      "padding_default": 0.02
+    },
+    {
+      "case_id": "case10_vfx_plate",
+      "fill_ratio": 0.5398530317989358,
+      "bbox_too_wide": false,
+      "negative_count": 3,
+      "positive_count": 4,
+      "negatives_maybe_harsh": false,
+      "seed_in_region": true,
+      "centroid_in_region": true,
+      "coverage": 0.08840386284722222,
+      "bbox_area": 0.16375542534722223,
+      "warning": null,
+      "padding_default": 0.02
+    }
+  ],
+  "viewer_transform": {
+    "source_depth_identical": true,
+    "affects_depth": false,
+    "note": "Exposure/display/view do not enter DepthAnything adapter path; DepthFrame keyed on SOURCE."
+  },
+  "summary": {
+    "n_cases": 10,
+    "median_interaction_reduction_pct": 50.0,
+    "mean_interaction_reduction_pct": 48.333333333333336,
+    "depth_first_pass_rate": 0.9,
+    "manual_first_pass_rate": 1.0,
+    "cases_depth_fewer": 10
+  },
+  "decisions": {
+    "depth_assist": "CONDITIONAL GO",
+    "d4": "NO-GO",
+    "rationale": {
+      "median_reduction_met": true,
+      "first_pass_within_15pp": true,
+      "d4_blocked_on": [
+        "no artist-logged interaction telemetry",
+        "proxy scenario labeling",
+        "mock SAM acceptance heuristic",
+        "tolerance cliff above 0.08 on some plates"
+      ]
+    }
+  },
+  "recommendations": {
+    "default_tolerance": 0.08,
+    "negative_point_policy": "KEEP with soft disable for tiny regions",
+    "bbox_padding": "KEEP 0.02; consider dynamic shrink when coverage/bbox fill is low"
+  },
+  "limitations": [
+    "Scenario tags are proxies of available real/video fixtures \u2014 not dedicated per-scenario curated shots.",
+    "Manual interaction counts are synthesized typical budgets (3+/2-/1 bbox).",
+    "Hypothesis accept uses MockSegmentation + area heuristics, not artist visual accept."
+  ]
+}
