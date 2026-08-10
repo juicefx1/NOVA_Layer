@@ -26,6 +26,7 @@ from nova_layer.domain.models import (
     SkeletonGuidance,
     SkeletonJoint,
 )
+from nova_layer.app.depth_region import blend_depth_overlay
 
 
 class GuidanceMode(StrEnum):
@@ -45,6 +46,7 @@ class GuidanceViewer(QLabel):
     skeleton_joint_label_requested = Signal(object, object)
     pixel_hovered = Signal(int, int)
     pixel_hover_cleared = Signal()
+    depth_seed_clicked = Signal(int, int)
 
     def __init__(self) -> None:
         super().__init__("Import a video to create the first Shot")
@@ -62,6 +64,12 @@ class GuidanceViewer(QLabel):
         self._performance_hud_signature: str | None = None
         self._image: QImage | None = None
         self._mask_overlay: QImage | None = None
+        self._depth_grayscale: NDArray[np.uint8] | None = None
+        self._depth_overlay_enabled = False
+        self._depth_overlay_opacity = 0.55
+        self._depth_region_overlay: QImage | None = None
+        self._depth_pick_mode = False
+        self._suppress_false_color_for_depth = False
         self._display_rect = QRect()
         self._mode = GuidanceMode.NAVIGATE
         self._points: list[GuidancePoint] = []
@@ -180,6 +188,89 @@ class GuidanceViewer(QLabel):
     def clear_false_color(self) -> None:
         self.set_false_color_frame(None, legend=None, show_legend=False)
 
+    def set_depth_overlay(
+        self,
+        grayscale: NDArray[np.uint8] | None,
+        *,
+        enabled: bool = True,
+        opacity: float = 0.55,
+    ) -> None:
+        """Set Depth Overlay grayscale (HxW uint8). Does not mutate ``_frame``.
+
+        Conflict policy: while Depth Overlay is enabled, False Color display buffer
+        is suppressed (settings/mode elsewhere unchanged).
+        """
+        if grayscale is None:
+            self._depth_grayscale = None
+        else:
+            arr = np.asarray(grayscale)
+            if arr.ndim != 2:
+                raise ValueError(f"depth grayscale must be HxW, got {arr.shape}")
+            self._depth_grayscale = np.ascontiguousarray(arr, dtype=np.uint8)
+        self._depth_overlay_enabled = bool(enabled) and self._depth_grayscale is not None
+        self._depth_overlay_opacity = max(0.0, min(1.0, float(opacity)))
+        self._suppress_false_color_for_depth = self._depth_overlay_enabled
+        self._rebuild_display_image()
+        self._update_display_rect()
+        self.update()
+
+    def set_depth_overlay_enabled(self, enabled: bool) -> None:
+        self._depth_overlay_enabled = bool(enabled) and self._depth_grayscale is not None
+        self._suppress_false_color_for_depth = self._depth_overlay_enabled
+        self._rebuild_display_image()
+        self.update()
+
+    def set_depth_overlay_opacity(self, opacity: float) -> None:
+        self._depth_overlay_opacity = max(0.0, min(1.0, float(opacity)))
+        if self._depth_overlay_enabled:
+            self._rebuild_display_image()
+            self.update()
+
+    def clear_depth_overlay(self) -> None:
+        self._depth_grayscale = None
+        self._depth_overlay_enabled = False
+        self._suppress_false_color_for_depth = False
+        self._rebuild_display_image()
+        self.update()
+
+    def set_depth_region_mask(self, mask: NDArray[np.bool_] | None) -> None:
+        """Highlight a Depth Region candidate (amber) above the depth grayscale."""
+        if mask is None:
+            self._depth_region_overlay = None
+            self.update()
+            return
+        alpha = np.asarray(mask, dtype=bool)
+        height, width = alpha.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[:, :, 0] = 255
+        rgba[:, :, 1] = 176
+        rgba[:, :, 2] = 48
+        rgba[:, :, 3] = (alpha.astype(np.uint8) * 110)
+        rgba = np.ascontiguousarray(rgba)
+        self._depth_region_overlay = QImage(
+            rgba.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        self.update()
+
+    def clear_depth_region_mask(self) -> None:
+        self.set_depth_region_mask(None)
+
+    def set_depth_pick_mode(self, enabled: bool) -> None:
+        """When True, clicks emit ``depth_seed_clicked`` and skip guidance edits."""
+        self._depth_pick_mode = bool(enabled)
+        if self._depth_pick_mode:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif self._mode == GuidanceMode.NAVIGATE:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    @property
+    def depth_pick_mode(self) -> bool:
+        return self._depth_pick_mode
+
     def set_performance_hud(
         self,
         *,
@@ -208,14 +299,26 @@ class GuidanceViewer(QLabel):
         self.set_performance_hud(enabled=False, lines=(), signature=None)
 
     def _rebuild_display_image(self) -> None:
-        display = (
-            self._false_color_frame
-            if self._false_color_frame is not None
-            else self._frame
+        # Conflict: Depth Overlay wins over False Color display buffer.
+        use_false = (
+            self._false_color_frame is not None and not self._suppress_false_color_for_depth
         )
-        if display is None:
+        base = self._false_color_frame if use_false else self._frame
+        if base is None:
             self._image = None
             return
+        display = base
+        if (
+            self._depth_overlay_enabled
+            and self._depth_grayscale is not None
+            and self._frame is not None
+            and self._depth_grayscale.shape == self._frame.shape[:2]
+        ):
+            display = blend_depth_overlay(
+                self._frame,
+                self._depth_grayscale,
+                opacity=self._depth_overlay_opacity,
+            )
         height, width, channels = display.shape
         self._image = QImage(
             display.data,
@@ -334,6 +437,13 @@ class GuidanceViewer(QLabel):
                 Qt.TransformationMode.SmoothTransformation,
             )
             painter.drawPixmap(self._display_rect, pixmap)
+            if self._depth_region_overlay is not None:
+                region = QPixmap.fromImage(self._depth_region_overlay).scaled(
+                    self._display_rect.size(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(self._display_rect, region)
             if self._mask_overlay is not None:
                 overlay = QPixmap.fromImage(self._mask_overlay).scaled(
                     self._display_rect.size(),
@@ -341,7 +451,11 @@ class GuidanceViewer(QLabel):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 painter.drawPixmap(self._display_rect, overlay)
-            if self._show_false_color_legend and self._false_color_legend:
+            if (
+                self._show_false_color_legend
+                and self._false_color_legend
+                and not self._suppress_false_color_for_depth
+            ):
                 self._paint_false_color_legend(painter)
             self._paint_guidance(painter)
         if self._performance_hud_enabled and self._performance_hud_lines:
@@ -507,6 +621,11 @@ class GuidanceViewer(QLabel):
                     painter.drawText(position + QPoint(9, 9), " · ".join(parts))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._depth_pick_mode and event.button() == Qt.MouseButton.LeftButton:
+            coords = self.widget_to_image_coordinates(event.position())
+            if coords is not None:
+                self.depth_seed_clicked.emit(coords[0], coords[1])
+            return
         normalized = self._to_normalized(event.position().toPoint())
         if normalized is None:
             return

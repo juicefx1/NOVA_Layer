@@ -48,6 +48,12 @@ from nova_layer.app.color_pipeline_diagnostics import (
 )
 from nova_layer.app.depth_analysis import DepthAnalysisService
 from nova_layer.app.depth_frame_cache import DepthFrameCache
+from nova_layer.app.depth_region import (
+    DEFAULT_DEPTH_TOLERANCE,
+    DepthRegion,
+    depth_to_grayscale,
+    extract_depth_region,
+)
 from nova_layer.app.frame_cache_stats import FrameCacheStats
 from nova_layer.app.frame_decode_service import FrameDecodeService
 from nova_layer.app.false_color import (
@@ -310,6 +316,8 @@ class ProjectController(QObject):
     depth_analysis_ready = Signal(object)
     depth_analysis_failed = Signal(str)
     depth_analysis_cancelled = Signal()
+    depth_region_ready = Signal(object)
+    depth_region_cleared = Signal()
 
     def __init__(
         self,
@@ -369,6 +377,8 @@ class ProjectController(QObject):
             else None
         )
         self._last_depth_frame: DepthFrame | None = None
+        self._last_depth_region: DepthRegion | None = None
+        self._depth_region_tolerance = DEFAULT_DEPTH_TOLERANCE
 
     def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
         """Cancel active processing and wait briefly for the worker pool to drain.
@@ -573,7 +583,7 @@ class ProjectController(QObject):
         if shot.master_frame not in frames:
             frames.append(shot.master_frame)
         for frame_number in frames:
-            self.request_frame(frame_number)
+            self.request_frame(frame_number, clear_depth_region=False)
 
     def set_working_space_settings(
         self,
@@ -594,7 +604,7 @@ class ProjectController(QObject):
         if shot.master_frame not in frames:
             frames.append(shot.master_frame)
         for frame_number in frames:
-            self.request_frame(frame_number)
+            self.request_frame(frame_number, clear_depth_region=False)
 
     def set_sam_processing_profile(
         self,
@@ -618,6 +628,71 @@ class ProjectController(QObject):
     @property
     def last_depth_frame(self) -> DepthFrame | None:
         return self._last_depth_frame
+
+    @property
+    def last_depth_region(self) -> DepthRegion | None:
+        return self._last_depth_region
+
+    @property
+    def depth_region_tolerance(self) -> float:
+        return float(self._depth_region_tolerance)
+
+    def set_depth_region_tolerance(self, tolerance: float) -> None:
+        """Session-only UI tolerance in [0, 1] (not raw depth units)."""
+        self._depth_region_tolerance = float(np.clip(tolerance, 0.0, 1.0))
+
+    def depth_visualization_grayscale(
+        self,
+        *,
+        near_white: bool = True,
+    ) -> NDArray[np.uint8] | None:
+        """Viewer-only remap of ``last_depth_frame``; None when unavailable."""
+        frame = self._last_depth_frame
+        if frame is None:
+            return None
+        return depth_to_grayscale(frame, near_white=near_white)
+
+    def select_depth_region(
+        self,
+        *,
+        x: int,
+        y: int,
+        tolerance: float | None = None,
+    ) -> DepthRegion | None:
+        """Create a Depth Region candidate from a click seed (no SAM)."""
+        frame = self._last_depth_frame
+        if frame is None:
+            self.error_occurred.emit("Analyze Scene before picking a Depth Region.")
+            return None
+        tol = (
+            float(self._depth_region_tolerance)
+            if tolerance is None
+            else float(np.clip(tolerance, 0.0, 1.0))
+        )
+        if tolerance is not None:
+            self._depth_region_tolerance = tol
+        region = extract_depth_region(
+            frame,
+            seed_x=int(x),
+            seed_y=int(y),
+            tolerance=tol,
+        )
+        self._last_depth_region = region
+        self.depth_region_ready.emit(region)
+        return region
+
+    def clear_depth_region(self) -> None:
+        if self._last_depth_region is None:
+            self.depth_region_cleared.emit()
+            return
+        self._last_depth_region = None
+        self.depth_region_cleared.emit()
+
+    def _clear_depth_region_silent(self) -> None:
+        had = self._last_depth_region is not None
+        self._last_depth_region = None
+        if had:
+            self.depth_region_cleared.emit()
 
     @property
     def depth_cache_stats(self) -> FrameCacheStats | None:
@@ -713,6 +788,7 @@ class ProjectController(QObject):
     def _reset_depth_ephemeral(self) -> None:
         self._depth_cache.clear()
         self._last_depth_frame = None
+        self._clear_depth_region_silent()
 
     def create_project(self, name: str, parent_directory: Path) -> Project | None:
         clean_name = name.strip()
@@ -899,7 +975,12 @@ class ProjectController(QObject):
         self.shot_changed.emit(updated)
         return True
 
-    def request_frame(self, frame_number: int) -> bool:
+    def request_frame(
+        self,
+        frame_number: int,
+        *,
+        clear_depth_region: bool = True,
+    ) -> bool:
         shot = self.active_shot
         if shot is None or shot.media.source_path is None:
             return False
@@ -912,6 +993,12 @@ class ProjectController(QObject):
             self.error_occurred.emit(str(exc))
             return False
         self._preview_frame_number = frame_number
+        if (
+            clear_depth_region
+            and self._last_depth_region is not None
+            and self._last_depth_region.frame_number != int(frame_number)
+        ):
+            self._clear_depth_region_silent()
         return True
 
     def update_artist_guidance(
@@ -2703,6 +2790,7 @@ class ProjectController(QObject):
             )
             return
         self._last_depth_frame = output.depth_frame
+        self._clear_depth_region_silent()
         self.depth_analysis_ready.emit(output.depth_frame)
 
     def _job_cancelled(self, name: str) -> None:

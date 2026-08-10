@@ -129,6 +129,15 @@ class PixelInspectorPanel(QWidget):
             )
         )
 
+        self._depth_value = QLabel("—")
+        self._depth_value.setObjectName("pixelInspectorDepthValue")
+        layout.addWidget(
+            self._form_group(
+                "Depth",
+                [("Value", self._depth_value)],
+            )
+        )
+
         self._status = QLabel("Empty")
         self._status.setObjectName("pixelInspectorStatus")
         _selectable(self._status)
@@ -204,7 +213,18 @@ class PixelInspectorPanel(QWidget):
             self._ctx_display.setText("—")
             self._ctx_view.setText("—")
             self._ctx_exposure.setText("—")
+        self.set_depth_readout(None)
         self._status.setText(_text(inspection.warning, empty="Ready"))
+
+    def set_depth_readout(self, value: float | None, *, note: str | None = None) -> None:
+        """Optional Depth Assist readout; does not affect PREVIEW/SOURCE/SCENE samples."""
+        if value is None:
+            self._depth_value.setText(_text(note))
+            return
+        text = f"{value:.4f}"
+        if note:
+            text = f"{text} · {note}"
+        self._depth_value.setText(text)
 
     def _apply_sample(
         self,

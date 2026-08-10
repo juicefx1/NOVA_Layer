@@ -46,6 +46,7 @@ _PROCESSING_JOB_LABELS = {
     "bidirectional_propagation": "Propagation",
     "background_removal_clip": "Background Removal Clip",
     "background_removal_preview": "Background Removal Preview",
+    "depth_analysis": "Depth Analysis",
 }
 from nova_layer.domain.skeleton_presets import openpose_body_25_preset
 from nova_layer.object_workflow.application.workspace_manager import WorkspaceManager
@@ -58,6 +59,7 @@ from nova_layer.app.false_color import FalseColorMode, FalseColorSettings, legen
 from nova_layer.app.pixel_inspection import empty_pixel_inspection
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
+from nova_layer.ui.depth_assist_panel import DepthAssistPanel
 from nova_layer.ui.false_color_controls import FalseColorControlsPanel
 from nova_layer.ui.guidance_viewer import GuidanceMode, GuidanceViewer
 from nova_layer.ui.histogram_panel import HistogramPanel
@@ -122,6 +124,7 @@ class WorkspaceWindow(QMainWindow):
         self._build_pixel_inspector_dock()
         self._build_histogram_dock()
         self._build_false_color_dock()
+        self._build_depth_assist_dock()
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -135,6 +138,7 @@ class WorkspaceWindow(QMainWindow):
         self._wire_pixel_inspector()
         self._wire_histogram_panel()
         self._wire_false_color_panel()
+        self._wire_depth_assist_panel()
 
         status = QStatusBar()
         status.showMessage("Ready — import media to begin")
@@ -162,6 +166,12 @@ class WorkspaceWindow(QMainWindow):
         controller.skeleton_correction_applied.connect(self._skeleton_correction_applied)
         controller.skeleton_correction_removed.connect(self._skeleton_correction_removed)
         controller.skeleton_retracking_ready.connect(self._skeleton_retracking_ready)
+        controller.depth_analysis_started.connect(self._depth_analysis_started)
+        controller.depth_analysis_ready.connect(self._depth_analysis_ready)
+        controller.depth_analysis_failed.connect(self._depth_analysis_failed)
+        controller.depth_analysis_cancelled.connect(self._depth_analysis_cancelled)
+        controller.depth_region_ready.connect(self._depth_region_ready)
+        controller.depth_region_cleared.connect(self._depth_region_cleared)
         controller.skeleton_fusion_candidate_ready.connect(self._review_skeleton_fusion)
         controller.skeleton_fusion_reviewed.connect(self._skeleton_fusion_reviewed)
         controller.processing_started.connect(self._processing_started)
@@ -231,6 +241,11 @@ class WorkspaceWindow(QMainWindow):
         self.false_color_action.setCheckable(True)
         self.false_color_action.setChecked(False)
         self.false_color_action.toggled.connect(self._set_false_color_visible)
+        self.depth_assist_action = view_menu.addAction("Depth Assist")
+        self.depth_assist_action.setObjectName("depthAssistAction")
+        self.depth_assist_action.setCheckable(True)
+        self.depth_assist_action.setChecked(False)
+        self.depth_assist_action.toggled.connect(self._set_depth_assist_visible)
         self.performance_hud_action = view_menu.addAction("Performance HUD")
         self.performance_hud_action.setObjectName("performanceHudAction")
         self.performance_hud_action.setCheckable(True)
@@ -349,6 +364,179 @@ class WorkspaceWindow(QMainWindow):
         self.false_color_dock.visibilityChanged.connect(
             self._on_false_color_visibility_changed
         )
+
+    def _build_depth_assist_dock(self) -> None:
+        self.depth_assist_panel = DepthAssistPanel()
+        self.depth_assist_dock = QDockWidget("Depth Assist", self)
+        self.depth_assist_dock.setObjectName("depthAssistDock")
+        self.depth_assist_dock.setWidget(self.depth_assist_panel)
+        self.depth_assist_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.depth_assist_dock)
+        self.depth_assist_dock.hide()
+        self.depth_assist_dock.visibilityChanged.connect(
+            self._on_depth_assist_visibility_changed
+        )
+        self.depth_assist_panel.set_empty_state()
+
+    def _wire_depth_assist_panel(self) -> None:
+        panel = self.depth_assist_panel
+        panel.analyze_requested.connect(self._request_depth_analysis)
+        panel.cancel_requested.connect(self.controller.cancel_depth_analysis)
+        panel.overlay_toggled.connect(self._on_depth_overlay_toggled)
+        panel.opacity_changed.connect(self._on_depth_opacity_changed)
+        panel.pick_toggled.connect(self._on_depth_pick_toggled)
+        panel.tolerance_changed.connect(self._on_depth_tolerance_changed)
+        panel.clear_region_requested.connect(self.controller.clear_depth_region)
+        self.viewer.depth_seed_clicked.connect(self._on_depth_seed_clicked)
+
+    def _set_depth_assist_visible(self, visible: bool) -> None:
+        self.depth_assist_dock.setVisible(visible)
+        if visible:
+            self._refresh_depth_assist_empty_state()
+
+    def _on_depth_assist_visibility_changed(self, visible: bool) -> None:
+        if self.depth_assist_action.isChecked() != visible:
+            self.depth_assist_action.blockSignals(True)
+            self.depth_assist_action.setChecked(visible)
+            self.depth_assist_action.blockSignals(False)
+        if not visible:
+            self.viewer.set_depth_pick_mode(False)
+            self.depth_assist_panel.pick_button.blockSignals(True)
+            self.depth_assist_panel.pick_button.setChecked(False)
+            self.depth_assist_panel.pick_button.blockSignals(False)
+
+    def _refresh_depth_assist_empty_state(self) -> None:
+        shot = self.controller.active_shot
+        if shot is None or shot.media is None or shot.media.source_path is None:
+            self.depth_assist_panel.set_empty_state()
+            return
+        if self.controller.last_depth_frame is not None:
+            self.depth_assist_panel.set_depth_available(True)
+            self.depth_assist_panel.set_status(
+                "Depth ready — enable Depth Overlay or Pick Region."
+            )
+        else:
+            self.depth_assist_panel.set_depth_available(False)
+            self.depth_assist_panel.set_status(
+                "Analyze Scene on the current frame (SOURCE depth prior)."
+            )
+
+    def _request_depth_analysis(self) -> None:
+        if self.controller.active_shot is None:
+            self.depth_assist_panel.set_status("Import media before Analyze Scene.")
+            return
+        started = self.controller.start_depth_analysis()
+        if not started:
+            self.depth_assist_panel.set_analyzing(False)
+
+    def _depth_analysis_started(self, frame_number: int) -> None:
+        self.depth_assist_panel.set_analyzing(True)
+        self.depth_assist_panel.set_status(f"Analyzing Scene · frame {frame_number}…")
+
+    def _depth_analysis_ready(self, depth_frame: object) -> None:
+        self.depth_assist_panel.set_analyzing(False)
+        self.depth_assist_panel.set_depth_available(True)
+        frame_number = getattr(depth_frame, "frame_number", "?")
+        self.depth_assist_panel.set_status(
+            f"Depth ready · frame {frame_number}. Depth Regions are spatial priors, not mattes."
+        )
+        if self.depth_assist_panel.overlay_check.isChecked():
+            self._apply_depth_overlay_to_viewer()
+
+    def _depth_analysis_failed(self, message: str) -> None:
+        self.depth_assist_panel.set_analyzing(False)
+        self.depth_assist_panel.set_status(
+            f"{message} — Continue without Depth using Artist Guidance."
+        )
+
+    def _depth_analysis_cancelled(self) -> None:
+        self.depth_assist_panel.set_analyzing(False)
+        self.depth_assist_panel.set_status("Depth analysis cancelled.")
+
+    def _apply_depth_overlay_to_viewer(self) -> None:
+        gray = self.controller.depth_visualization_grayscale(near_white=True)
+        if gray is None:
+            self.viewer.clear_depth_overlay()
+            return
+        self.viewer.set_depth_overlay(
+            gray,
+            enabled=True,
+            opacity=self.depth_assist_panel.current_opacity(),
+        )
+
+    def _on_depth_overlay_toggled(self, enabled: bool) -> None:
+        if not enabled:
+            self.viewer.set_depth_overlay_enabled(False)
+            # Restore False Color if dock visible / mode active.
+            self._schedule_false_color_refresh(force=True)
+            return
+        if self.controller.last_depth_frame is None:
+            self.depth_assist_panel.overlay_check.blockSignals(True)
+            self.depth_assist_panel.overlay_check.setChecked(False)
+            self.depth_assist_panel.overlay_check.blockSignals(False)
+            self.depth_assist_panel.set_status("Analyze Scene before enabling Depth Overlay.")
+            return
+        self._apply_depth_overlay_to_viewer()
+
+    def _on_depth_opacity_changed(self, opacity: float) -> None:
+        self.viewer.set_depth_overlay_opacity(opacity)
+
+    def _on_depth_pick_toggled(self, enabled: bool) -> None:
+        if enabled and self.controller.last_depth_frame is None:
+            self.depth_assist_panel.pick_button.blockSignals(True)
+            self.depth_assist_panel.pick_button.setChecked(False)
+            self.depth_assist_panel.pick_button.blockSignals(False)
+            self.depth_assist_panel.set_status("Analyze Scene before picking a Depth Region.")
+            return
+        if enabled:
+            # Avoid competing with guidance click tools.
+            self._select_guidance_mode(GuidanceMode.NAVIGATE, True)
+            self.viewer.set_mode(GuidanceMode.NAVIGATE)
+        self.viewer.set_depth_pick_mode(enabled)
+        if enabled:
+            self.depth_assist_panel.set_status(
+                "Pick Region — click the viewer to seed a Depth Region (not a matte)."
+            )
+
+    def _on_depth_tolerance_changed(self, tolerance: float) -> None:
+        self.controller.set_depth_region_tolerance(tolerance)
+        region = self.controller.last_depth_region
+        if region is None:
+            return
+        # Re-seed with previous click when tolerance changes.
+        updated = self.controller.select_depth_region(
+            x=region.seed_x,
+            y=region.seed_y,
+            tolerance=tolerance,
+        )
+        if updated is not None:
+            self._depth_region_ready(updated)
+
+    def _on_depth_seed_clicked(self, x: int, y: int) -> None:
+        region = self.controller.select_depth_region(
+            x=x,
+            y=y,
+            tolerance=self.depth_assist_panel.current_tolerance(),
+        )
+        if region is None:
+            self.depth_assist_panel.set_status("Could not create a Depth Region at this click.")
+
+    def _depth_region_ready(self, region: object) -> None:
+        from nova_layer.app.depth_region import DepthRegion
+
+        if not isinstance(region, DepthRegion):
+            return
+        self.depth_assist_panel.apply_region(region)
+        if region.pixel_count > 0:
+            self.viewer.set_depth_region_mask(region.mask)
+        else:
+            self.viewer.clear_depth_region_mask()
+
+    def _depth_region_cleared(self) -> None:
+        self.depth_assist_panel.clear_region_stats()
+        self.viewer.clear_depth_region_mask()
 
     def _wire_false_color_panel(self) -> None:
         self.false_color_panel.settings_changed.connect(self._on_false_color_settings)
@@ -574,6 +762,23 @@ class WorkspaceWindow(QMainWindow):
             inspection,
             diagnostics=self.controller.color_pipeline_diagnostics,
         )
+        depth_frame = self.controller.last_depth_frame
+        if (
+            depth_frame is not None
+            and depth_frame.frame_number == frame_number
+            and 0 <= y < depth_frame.depth.shape[0]
+            and 0 <= x < depth_frame.depth.shape[1]
+        ):
+            value = float(depth_frame.depth[y, x])
+            valid = depth_frame.valid_mask
+            if valid is not None and not bool(valid[y, x]):
+                self.pixel_inspector_panel.set_depth_readout(None, note="invalid")
+            elif not np.isfinite(value):
+                self.pixel_inspector_panel.set_depth_readout(None, note="non-finite")
+            else:
+                self.pixel_inspector_panel.set_depth_readout(value)
+        else:
+            self.pixel_inspector_panel.set_depth_readout(None)
 
     def _open_color_settings(self) -> None:
         dialog = ColorSettingsDialog(
@@ -971,6 +1176,7 @@ class WorkspaceWindow(QMainWindow):
             self._refresh_render_controls([])
         self.lifecycle_legend.setText(self.timeline.lifecycle_summary())
         self.statusBar().showMessage("Media ready — choose Shot Range and Master Frame")
+        self._refresh_depth_assist_empty_state()
 
     def set_frame(self, frame_number: int, frame: NDArray[np.uint8]) -> None:
         self._discard_skeleton_correction()

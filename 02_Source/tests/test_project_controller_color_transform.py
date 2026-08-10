@@ -154,9 +154,9 @@ def test_set_display_transform_keeps_reader_clears_preview_cache(
     requested: list[int] = []
     original_request = controller.request_frame
 
-    def _spy_request(frame_number: int) -> bool:
+    def _spy_request(frame_number: int, **kwargs: object) -> bool:
         requested.append(frame_number)
-        return original_request(frame_number)
+        return original_request(frame_number, **kwargs)  # type: ignore[arg-type]
 
     controller.request_frame = _spy_request  # type: ignore[method-assign]
 
