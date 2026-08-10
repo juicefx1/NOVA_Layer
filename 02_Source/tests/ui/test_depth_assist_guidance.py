@@ -109,3 +109,67 @@ def test_assist_flow_summary_clear_preserves_manual_no_auto_hypothesis(
         abs(p.x - 0.2) < 1e-9 and abs(p.y - 0.3) < 1e-9 for p in window.viewer.points
     )
     assert window.viewer._depth_region_overlay is not None
+
+
+def test_tiny_region_summary_and_cliff_warning_no_rollback(qtbot: QtBot) -> None:
+    from nova_layer.app.depth_guidance import (
+        REDUCED_NEGATIVE_STATUS,
+        DepthGuidanceProposal,
+    )
+    from nova_layer.app.depth_region import TOLERANCE_CLIFF_WARNING, DepthRegion, freeze_bool_mask
+    from nova_layer.domain.models import GuidancePoint
+
+    panel = DepthAssistPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+
+    tiny_raw = np.zeros((40, 40), dtype=bool)
+    tiny_raw[20, 20] = True
+    tiny_mask = freeze_bool_mask(tiny_raw)
+    tiny = DepthRegion(
+        frame_number=0,
+        seed_x=20,
+        seed_y=20,
+        seed_depth=1.0,
+        tolerance=0.08,
+        mask=tiny_mask,
+        bounding_box=(20, 20, 20, 20),
+        pixel_count=1,
+        coverage=0.0004,
+        warning=None,
+    )
+    panel.apply_region(tiny)
+    assert panel.assist_button.isEnabled()
+    assert REDUCED_NEGATIVE_STATUS in panel.status_label.text()
+
+    proposal = DepthGuidanceProposal(
+        frame_number=0,
+        positive_points=(GuidancePoint(x=0.5, y=0.5, polarity="positive"),),
+        negative_points=(),
+        bounding_region=None,
+        source_region_coverage=0.0004,
+        warning=REDUCED_NEGATIVE_STATUS,
+    )
+    panel.apply_guidance_proposal(proposal)
+    assert panel.guidance_positive_label.text() == "1"
+    assert panel.guidance_negative_label.text() == "0"
+    assert panel.assist_button.isEnabled()
+
+    cliff_mask = freeze_bool_mask(np.ones((40, 40), dtype=bool))
+    cliff = DepthRegion(
+        frame_number=0,
+        seed_x=20,
+        seed_y=20,
+        seed_depth=1.0,
+        tolerance=0.2,
+        mask=cliff_mask,
+        bounding_box=(0, 0, 39, 39),
+        pixel_count=1600,
+        coverage=1.0,
+        warning=TOLERANCE_CLIFF_WARNING,
+    )
+    before_tol = panel.current_tolerance()
+    panel.apply_region(cliff)
+    assert TOLERANCE_CLIFF_WARNING in panel.status_label.text()
+    assert panel.assist_button.isEnabled()
+    assert panel.current_tolerance() == before_tol  # no automatic rollback

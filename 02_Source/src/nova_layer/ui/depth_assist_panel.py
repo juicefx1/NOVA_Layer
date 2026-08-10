@@ -16,7 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nova_layer.app.depth_guidance import DepthGuidanceProposal
+from nova_layer.app.depth_guidance import (
+    NEGATIVE_FULL_MIN_COVERAGE,
+    REDUCED_NEGATIVE_STATUS,
+    DepthGuidanceProposal,
+)
 from nova_layer.app.depth_region import DEFAULT_DEPTH_TOLERANCE, DepthRegion
 
 
@@ -228,8 +232,20 @@ class DepthAssistPanel(QWidget):
             self.bbox_label.setText(f"({x0},{y0})–({x1},{y1})")
         self.clear_region_button.setEnabled(region.pixel_count > 0)
         self.set_assist_enabled(region.pixel_count > 0)
+        status_parts: list[str] = []
         if region.warning:
-            self.set_status(region.warning)
+            status_parts.append(region.warning)
+        elif (
+            region.pixel_count > 0
+            and float(region.coverage) < NEGATIVE_FULL_MIN_COVERAGE
+        ):
+            status_parts.append(REDUCED_NEGATIVE_STATUS)
+        if status_parts:
+            self.set_status(" ".join(dict.fromkeys(status_parts)))
+        else:
+            self.set_status(
+                "Depth Region ready — Assist with Depth generates SAM guidance points."
+            )
 
     def apply_guidance_proposal(self, proposal: DepthGuidanceProposal | None) -> None:
         if proposal is None:

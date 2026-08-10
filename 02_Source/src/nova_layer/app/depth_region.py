@@ -7,7 +7,7 @@ Connected-component policy: **8-connected** (orthogonal + diagonal).
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,6 +17,13 @@ from nova_layer.ports.depth import DepthFrame, freeze_valid_mask
 DEFAULT_DEPTH_TOLERANCE = 0.08
 TINY_COVERAGE = 0.0005
 HUGE_COVERAGE = 0.55
+
+# D3.7 tolerance-cliff UX (from D3.6 sweeps: e.g. 5%→37%, 16%→85% at 0.08→0.10).
+TOLERANCE_CLIFF_GROWTH_RATIO = 2.5
+TOLERANCE_CLIFF_ABS_COVERAGE = 0.35
+TOLERANCE_CLIFF_WARNING = (
+    "Depth region expanded sharply. Consider lowering tolerance."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +128,72 @@ def bounding_box_from_mask(mask: NDArray[np.bool_]) -> tuple[int, int, int, int]
     if ys.size == 0:
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+
+def inclusive_bbox_area(box: tuple[int, int, int, int] | None) -> float:
+    """Pixel area of an inclusive (x0, y0, x1, y1) box, or 0 when missing."""
+    if box is None:
+        return 0.0
+    x0, y0, x1, y1 = (int(v) for v in box)
+    if x1 < x0 or y1 < y0:
+        return 0.0
+    return float((x1 - x0 + 1) * (y1 - y0 + 1))
+
+
+def detect_tolerance_cliff(
+    previous: DepthRegion | None,
+    current: DepthRegion,
+    *,
+    growth_ratio: float = TOLERANCE_CLIFF_GROWTH_RATIO,
+    abs_coverage: float = TOLERANCE_CLIFF_ABS_COVERAGE,
+) -> str | None:
+    """Return a non-blocking cliff warning, or None when growth is smooth / first pick.
+
+    Triggers when coverage or inclusive bbox area grows by ``growth_ratio`` vs the
+    previous same-seed region, or when absolute coverage crosses ``abs_coverage``
+    while still growing by at least 1.5× (guards false positives on tiny→tiny).
+    No automatic tolerance rollback — caller only surfaces the message.
+    """
+    if previous is None:
+        return None
+    if int(previous.frame_number) != int(current.frame_number):
+        return None
+    if int(previous.seed_x) != int(current.seed_x) or int(previous.seed_y) != int(
+        current.seed_y
+    ):
+        return None
+
+    prev_cov = float(previous.coverage)
+    new_cov = float(current.coverage)
+    prev_area = inclusive_bbox_area(previous.bounding_box)
+    new_area = inclusive_bbox_area(current.bounding_box)
+    ratio = float(growth_ratio)
+
+    coverage_jump = prev_cov > 0.0 and new_cov > prev_cov * ratio
+    bbox_jump = prev_area > 0.0 and new_area > prev_area * ratio
+    absolute_jump = (
+        new_cov > float(abs_coverage)
+        and prev_cov > 0.0
+        and new_cov > prev_cov * 1.5
+    )
+    if coverage_jump or bbox_jump or absolute_jump:
+        return TOLERANCE_CLIFF_WARNING
+    return None
+
+
+def annotate_tolerance_cliff(
+    region: DepthRegion,
+    previous: DepthRegion | None,
+) -> DepthRegion:
+    """Attach a tolerance-cliff warning onto ``region`` when criteria match."""
+    cliff = detect_tolerance_cliff(previous, region)
+    if cliff is None:
+        return region
+    existing = (region.warning or "").strip()
+    if cliff in existing:
+        return region
+    merged = f"{existing} {cliff}".strip() if existing else cliff
+    return replace(region, warning=merged)
 
 
 def extract_depth_region(

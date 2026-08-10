@@ -126,3 +126,50 @@ def test_media_change_clears(tmp_path: Path, qtbot: object) -> None:
     assert controller.relink_media(_png_sequence(tmp_path / "b"), accept_changed=True)
     assert controller.last_depth_frame is None
     assert controller.last_depth_region is None
+
+
+def test_tolerance_change_compares_previous_region_for_cliff(
+    tmp_path: Path, qtbot: object
+) -> None:
+    from dataclasses import replace
+
+    from nova_layer.app.depth_region import TOLERANCE_CLIFF_WARNING
+
+    controller = _ready_controller(tmp_path, qtbot)
+    first = controller.select_depth_region(x=8, y=6, tolerance=0.05)
+    assert first is not None and first.pixel_count > 0
+    # Session baseline: same seed/frame but artificially tight prior metrics.
+    controller._last_depth_region = replace(  # noqa: SLF001 — test harness
+        first,
+        coverage=0.02,
+        bounding_box=(8, 6, 9, 7),
+        pixel_count=4,
+        warning=None,
+        tolerance=0.05,
+    )
+    second = controller.select_depth_region(x=8, y=6, tolerance=0.9)
+    assert second is not None
+    assert second.pixel_count > 0
+    assert TOLERANCE_CLIFF_WARNING in (second.warning or "")
+
+    controller.clear_depth_region()
+    assert controller.last_depth_region is None
+    fresh = controller.select_depth_region(x=3, y=3, tolerance=0.9)
+    assert fresh is not None
+    assert TOLERANCE_CLIFF_WARNING not in (fresh.warning or "")
+
+
+def test_frame_change_clears_region_comparison_state(
+    tmp_path: Path, qtbot: object
+) -> None:
+    from nova_layer.app.depth_region import TOLERANCE_CLIFF_WARNING
+
+    controller = _ready_controller(tmp_path, qtbot)
+    assert controller.select_depth_region(x=5, y=5, tolerance=0.05) is not None
+    assert controller.request_frame(3)
+    assert controller.last_depth_region is None
+    with qtbot.waitSignal(controller.depth_analysis_ready, timeout=5000):  # type: ignore[attr-defined]
+        assert controller.start_depth_analysis(3)
+    region = controller.select_depth_region(x=5, y=5, tolerance=0.9)
+    assert region is not None
+    assert TOLERANCE_CLIFF_WARNING not in (region.warning or "")

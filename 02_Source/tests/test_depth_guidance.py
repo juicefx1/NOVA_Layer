@@ -87,10 +87,11 @@ def test_negative_four_sides_not_inside_region() -> None:
     mask = np.zeros((40, 40), dtype=bool)
     mask[10:30, 10:30] = True
     region = _region(mask, seed_x=15, seed_y=15)
+    assert region.coverage >= 0.02
     proposal = build_depth_guidance_proposal(
         region, image_width=40, image_height=40, include_negative_points=True
     )
-    assert len(proposal.negative_points) >= 1
+    assert len(proposal.negative_points) == 4
     for point in proposal.negative_points:
         assert point.polarity == "negative"
         px = int(round(point.x * 40 - 0.5))
@@ -98,6 +99,66 @@ def test_negative_four_sides_not_inside_region() -> None:
         px = max(0, min(39, px))
         py = max(0, min(39, py))
         assert not bool(mask[py, px])
+
+
+def test_negative_softening_by_coverage_bands() -> None:
+    # Large enough for full 4-way.
+    full = np.zeros((50, 50), dtype=bool)
+    full[10:30, 10:30] = True
+    full_region = _region(full, seed_x=15, seed_y=15, coverage=0.16)
+    full_prop = build_depth_guidance_proposal(full_region, image_width=50, image_height=50)
+    assert len(full_prop.negative_points) == 4
+
+    # Medium tiny band → max 2.
+    medium = np.zeros((100, 100), dtype=bool)
+    medium[40:50, 40:50] = True  # 100px / 10000 = 0.01
+    med_region = _region(medium, seed_x=45, seed_y=45, coverage=0.01)
+    med_prop = build_depth_guidance_proposal(med_region, image_width=100, image_height=100)
+    assert len(med_prop.negative_points) == 2
+    assert "reduced negative" in (med_prop.warning or "").lower()
+    for point in med_prop.negative_points:
+        px = int(round(point.x * 100 - 0.5))
+        py = int(round(point.y * 100 - 0.5))
+        assert not bool(medium[py, px])
+
+    # Very tiny → 0 negatives; positives retained.
+    tiny = np.zeros((100, 100), dtype=bool)
+    tiny[50, 50] = True
+    tiny_region = _region(tiny, seed_x=50, seed_y=50, coverage=0.0001)
+    tiny_prop = build_depth_guidance_proposal(tiny_region, image_width=100, image_height=100)
+    assert tiny_prop.positive_points
+    assert tiny_prop.negative_points == ()
+    assert "reduced negative" in (tiny_prop.warning or "").lower()
+
+
+def test_reduced_negatives_prefer_roomier_opposite_pair_deterministically() -> None:
+    # Region near left edge → more room on the right; horizontal axis wins.
+    mask = np.zeros((80, 80), dtype=bool)
+    mask[30:50, 2:12] = True  # coverage ~ 200/6400 ≈ 0.031 → wait need <0.02
+    # Force coverage into soft band without changing geometry claim.
+    region = _region(mask, seed_x=5, seed_y=40, coverage=0.01)
+    a = build_depth_guidance_proposal(region, image_width=80, image_height=80)
+    b = build_depth_guidance_proposal(region, image_width=80, image_height=80)
+    assert len(a.negative_points) == 2
+    assert a.negative_points == b.negative_points
+    # Mid-y left/right pair should be selected (horizontal roomier / tie-break).
+    ys = [round(p.y, 6) for p in a.negative_points]
+    assert ys[0] == ys[1]
+
+
+def test_merge_keeps_manual_negatives_when_depth_softens() -> None:
+    from nova_layer.app.depth_guidance import merge_depth_guidance_into_points
+    from nova_layer.domain.models import GuidancePoint
+
+    mask = np.zeros((100, 100), dtype=bool)
+    mask[50, 50] = True
+    region = _region(mask, seed_x=50, seed_y=50, coverage=0.0001)
+    proposal = build_depth_guidance_proposal(region, image_width=100, image_height=100)
+    assert proposal.negative_points == ()
+    manual = [GuidancePoint(x=0.1, y=0.1, polarity="negative")]
+    merged, keys = merge_depth_guidance_into_points(manual, proposal, previous_depth_keys=set())
+    assert any(p.polarity == "negative" and abs(p.x - 0.1) < 1e-9 for p in merged)
+    assert keys  # positives from depth
 
 
 def test_tiny_region_and_no_bbox() -> None:

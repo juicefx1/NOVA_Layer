@@ -21,6 +21,12 @@ MIN_BBOX_SIDE_PX = 4
 MAX_POSITIVE_POINTS = 4
 MIN_SPREAD_AXIS_PX = 6.0
 
+# D3.7 soft-guard: depth-generated negatives only (manual negatives untouched).
+# Thresholds match D3.6 recommendation (~2% soft-guard) with a quieter floor.
+NEGATIVE_FULL_MIN_COVERAGE = 0.02
+NEGATIVE_REDUCED_MIN_COVERAGE = 0.005
+REDUCED_NEGATIVE_STATUS = "Small depth region — reduced negative guidance"
+
 
 @dataclass(frozen=True, slots=True)
 class DepthGuidanceProposal:
@@ -162,34 +168,103 @@ def _positive_pixels(
     ]
 
 
+def max_depth_negatives_for_coverage(coverage: float) -> int:
+    """Limit depth-generated negatives by region coverage (D3.7 soft-guard).
+
+    - coverage >= 0.02 → up to 4 (legacy 4-way)
+    - 0.005 <= coverage < 0.02 → up to 2
+    - coverage < 0.005 → 0
+    """
+    cov = float(coverage)
+    if cov >= NEGATIVE_FULL_MIN_COVERAGE:
+        return 4
+    if cov >= NEGATIVE_REDUCED_MIN_COVERAGE:
+        return 2
+    return 0
+
+
+def _negative_candidate(
+    *,
+    side: str,
+    x: int,
+    y: int,
+    slack: int,
+) -> tuple[str, int, int, int]:
+    return (side, int(x), int(y), int(slack))
+
+
 def _negative_pixels(
     region: DepthRegion,
     *,
     height: int,
     width: int,
     outset: int = DEFAULT_NEGATIVE_OUTSET_PX,
+    max_count: int | None = None,
 ) -> list[tuple[int, int]]:
+    """Build depth negatives outside the region bbox.
+
+    When ``max_count`` is 2, prefer the opposite pair on the axis with more
+    outside room (deterministic: horizontal wins ties). Never place on the mask.
+    """
     box = region.bounding_box
     if box is None:
         return []
+    limit = 4 if max_count is None else max(0, int(max_count))
+    if limit <= 0:
+        return []
+
     x0, y0, x1, y1 = (int(v) for v in box)
     mask = np.asarray(region.mask, dtype=bool)
     mid_x = (x0 + x1) // 2
     mid_y = (y0 + y1) // 2
-    raw = (
-        (x0 - outset, mid_y),  # left
-        (x1 + outset, mid_y),  # right
-        (mid_x, y0 - outset),  # top
-        (mid_x, y1 + outset),  # bottom
+
+    left_slack = max(0, x0 - outset)
+    right_slack = max(0, (width - 1) - (x1 + outset))
+    top_slack = max(0, y0 - outset)
+    bottom_slack = max(0, (height - 1) - (y1 + outset))
+
+    sides = (
+        _negative_candidate(side="left", x=x0 - outset, y=mid_y, slack=left_slack),
+        _negative_candidate(side="right", x=x1 + outset, y=mid_y, slack=right_slack),
+        _negative_candidate(side="top", x=mid_x, y=y0 - outset, slack=top_slack),
+        _negative_candidate(side="bottom", x=mid_x, y=y1 + outset, slack=bottom_slack),
     )
-    out: list[tuple[int, int]] = []
-    for x, y in raw:
+
+    def _valid_pixel(x: int, y: int) -> tuple[int, int] | None:
         cx = _clamp_int(x, 0, width - 1)
         cy = _clamp_int(y, 0, height - 1)
         if bool(mask[cy, cx]):
+            return None
+        return (cx, cy)
+
+    if limit >= 4:
+        ordered = sides
+    else:
+        horiz_slack = left_slack + right_slack
+        vert_slack = top_slack + bottom_slack
+        # Prefer opposite pair on the roomier axis; horizontal wins ties.
+        if horiz_slack >= vert_slack:
+            primary = (sides[0], sides[1])  # left, right
+            secondary = (sides[2], sides[3])  # top, bottom
+        else:
+            primary = (sides[2], sides[3])
+            secondary = (sides[0], sides[1])
+        # Within each pair keep fixed L/R or T/B order, then fill from secondary
+        # by descending slack / side name for determinism.
+        secondary_sorted = tuple(
+            sorted(secondary, key=lambda item: (-item[3], item[0]))
+        )
+        ordered = (*primary, *secondary_sorted)
+
+    out: list[tuple[int, int]] = []
+    for _side, x, y, _slack in ordered:
+        pixel = _valid_pixel(x, y)
+        if pixel is None:
             continue
-        out.append((cx, cy))
-    return _dedupe_pixel_points(out, min_distance=DEFAULT_DEDUPE_DISTANCE_PX)
+        out.append(pixel)
+        if len(out) >= limit:
+            break
+    return _dedupe_pixel_points(out, min_distance=DEFAULT_DEDUPE_DISTANCE_PX)[:limit]
 
 
 def _inclusive_box_to_bounding_region(
@@ -353,9 +428,13 @@ def build_depth_guidance_proposal(
     )
 
     negatives: tuple[GuidancePoint, ...] = ()
-    if include_negative_points:
+    negative_cap = max_depth_negatives_for_coverage(float(region.coverage))
+    if include_negative_points and negative_cap > 0:
         negatives_px = _negative_pixels(
-            work_mask_region, height=image_height, width=image_width
+            work_mask_region,
+            height=image_height,
+            width=image_width,
+            max_count=negative_cap,
         )
         negatives = tuple(
             _make_point(
@@ -367,6 +446,12 @@ def build_depth_guidance_proposal(
             )
             for x, y in negatives_px
         )
+    elif include_negative_points and negative_cap == 0:
+        # Soft-guard intentionally omitted depth negatives for tiny regions.
+        pass
+
+    if include_negative_points and float(region.coverage) < NEGATIVE_FULL_MIN_COVERAGE:
+        warnings.append(REDUCED_NEGATIVE_STATUS)
 
     bbox = depth_bbox_to_bounding_region(
         work_mask_region,

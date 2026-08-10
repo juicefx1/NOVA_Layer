@@ -61,6 +61,7 @@ from nova_layer.app.depth_guidance import (
 from nova_layer.app.depth_region import (
     DEFAULT_DEPTH_TOLERANCE,
     DepthRegion,
+    annotate_tolerance_cliff,
     depth_to_grayscale,
     extract_depth_region,
 )
@@ -701,12 +702,15 @@ class ProjectController(QObject):
         )
         if tolerance is not None:
             self._depth_region_tolerance = tol
+        previous = self._last_depth_region
         region = extract_depth_region(
             frame,
             seed_x=int(x),
             seed_y=int(y),
             tolerance=tol,
         )
+        # Compare only when retuning the same seed (typical tolerance scrub).
+        region = annotate_tolerance_cliff(region, previous)
         self._last_depth_region = region
         self.depth_region_ready.emit(region)
         return region

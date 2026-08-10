@@ -6,8 +6,11 @@ import numpy as np
 import pytest
 
 from nova_layer.app.depth_region import (
+    TOLERANCE_CLIFF_WARNING,
+    annotate_tolerance_cliff,
     connected_component_8,
     depth_to_grayscale,
+    detect_tolerance_cliff,
     effective_depth_band,
     extract_depth_region,
 )
@@ -138,3 +141,131 @@ def test_effective_band_scales_with_tolerance() -> None:
     a = effective_depth_band(depth, valid, 0.1)
     b = effective_depth_band(depth, valid, 0.2)
     assert b == pytest.approx(2 * a)
+
+
+def test_tolerance_cliff_large_jump_and_smooth_growth() -> None:
+    from nova_layer.app.depth_region import DepthRegion, freeze_bool_mask
+
+    small_raw = np.zeros((40, 40), dtype=bool)
+    small_raw[18:22, 18:22] = True
+    mid_raw = np.zeros((40, 40), dtype=bool)
+    mid_raw[17:23, 17:23] = True
+    huge_raw = np.zeros((40, 40), dtype=bool)
+    huge_raw[5:35, 5:35] = True
+    small = freeze_bool_mask(small_raw)
+    mid = freeze_bool_mask(mid_raw)
+    huge = freeze_bool_mask(huge_raw)
+
+    prev = DepthRegion(
+        frame_number=1,
+        seed_x=20,
+        seed_y=20,
+        seed_depth=1.0,
+        tolerance=0.08,
+        mask=small,
+        bounding_box=(18, 18, 21, 21),
+        pixel_count=16,
+        coverage=0.05,
+    )
+    smooth = DepthRegion(
+        frame_number=1,
+        seed_x=20,
+        seed_y=20,
+        seed_depth=1.0,
+        tolerance=0.09,
+        mask=mid,
+        bounding_box=(17, 17, 22, 22),
+        pixel_count=36,
+        coverage=0.06,
+    )
+    cliffy = DepthRegion(
+        frame_number=1,
+        seed_x=20,
+        seed_y=20,
+        seed_depth=1.0,
+        tolerance=0.15,
+        mask=huge,
+        bounding_box=(5, 5, 34, 34),
+        pixel_count=900,
+        coverage=0.37,
+    )
+    assert detect_tolerance_cliff(None, prev) is None
+    assert detect_tolerance_cliff(prev, smooth) is None
+    assert detect_tolerance_cliff(prev, cliffy) == TOLERANCE_CLIFF_WARNING
+    annotated = annotate_tolerance_cliff(cliffy, prev)
+    assert TOLERANCE_CLIFF_WARNING in (annotated.warning or "")
+
+
+def test_tolerance_cliff_bbox_area_jump() -> None:
+    from nova_layer.app.depth_region import DepthRegion, freeze_bool_mask
+
+    small_raw = np.zeros((20, 20), dtype=bool)
+    small_raw[8:12, 8:12] = True
+    large_raw = np.zeros((20, 20), dtype=bool)
+    large_raw[1:19, 1:19] = True
+    small_mask = freeze_bool_mask(small_raw)
+    large_mask = freeze_bool_mask(large_raw)
+    prev = DepthRegion(
+        frame_number=0,
+        seed_x=10,
+        seed_y=10,
+        seed_depth=1.0,
+        tolerance=0.08,
+        mask=small_mask,
+        bounding_box=(8, 8, 11, 11),
+        pixel_count=16,
+        coverage=0.04,
+    )
+    cur = DepthRegion(
+        frame_number=0,
+        seed_x=10,
+        seed_y=10,
+        seed_depth=1.0,
+        tolerance=0.15,
+        mask=large_mask,
+        bounding_box=(1, 1, 18, 18),
+        pixel_count=324,
+        coverage=0.81,
+    )
+    assert detect_tolerance_cliff(prev, cur) == TOLERANCE_CLIFF_WARNING
+
+
+def test_tolerance_cliff_ignores_different_seed_or_frame() -> None:
+    from nova_layer.app.depth_region import DepthRegion, freeze_bool_mask
+
+    mask = freeze_bool_mask(np.ones((8, 8), dtype=bool))
+    prev = DepthRegion(
+        frame_number=0,
+        seed_x=2,
+        seed_y=2,
+        seed_depth=1.0,
+        tolerance=0.05,
+        mask=mask,
+        bounding_box=(0, 0, 1, 1),
+        pixel_count=4,
+        coverage=0.05,
+    )
+    other_seed = DepthRegion(
+        frame_number=0,
+        seed_x=5,
+        seed_y=5,
+        seed_depth=1.0,
+        tolerance=0.2,
+        mask=mask,
+        bounding_box=(0, 0, 7, 7),
+        pixel_count=64,
+        coverage=1.0,
+    )
+    other_frame = DepthRegion(
+        frame_number=3,
+        seed_x=2,
+        seed_y=2,
+        seed_depth=1.0,
+        tolerance=0.2,
+        mask=mask,
+        bounding_box=(0, 0, 7, 7),
+        pixel_count=64,
+        coverage=1.0,
+    )
+    assert detect_tolerance_cliff(prev, other_seed) is None
+    assert detect_tolerance_cliff(prev, other_frame) is None
