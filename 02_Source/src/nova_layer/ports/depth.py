@@ -22,6 +22,22 @@ class DepthModelUnavailableError(DepthAnalysisError):
     """Depth capability or model cannot be used."""
 
 
+class DepthBackendUnavailableError(DepthModelUnavailableError):
+    """Optional depth backend dependency or configuration is unavailable."""
+
+
+class DepthModelWeightsMissingError(DepthModelUnavailableError):
+    """Configured depth model weights are missing or inaccessible."""
+
+
+class DepthModelLoadError(DepthAnalysisError):
+    """Depth model architecture/weights failed to load."""
+
+
+class DepthInferenceError(DepthAnalysisError):
+    """Depth model inference failed after a successful load."""
+
+
 class InvalidDepthFrameError(DepthAnalysisError):
     """Inference result failed DepthFrame canonicalization/validation."""
 

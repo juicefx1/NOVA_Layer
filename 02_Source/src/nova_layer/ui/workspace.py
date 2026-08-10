@@ -416,15 +416,25 @@ class WorkspaceWindow(QMainWindow):
         if shot is None or shot.media is None or shot.media.source_path is None:
             self.depth_assist_panel.set_empty_state()
             return
+        if not self.controller.is_depth_backend_available():
+            diagnostics = self.controller.depth_backend_diagnostics()
+            detail = getattr(diagnostics, "last_error", None) or "Depth model unavailable."
+            self.depth_assist_panel.set_depth_available(False)
+            self.depth_assist_panel.set_status(
+                f"{detail} — Continue without Depth using Artist Guidance."
+            )
+            return
         if self.controller.last_depth_frame is not None:
             self.depth_assist_panel.set_depth_available(True)
+            device = getattr(self.controller.depth_backend_diagnostics(), "device", None)
+            device_note = f" · {device}" if device else ""
             self.depth_assist_panel.set_status(
-                "Depth ready — enable Depth Overlay or Pick Region."
+                f"Depth ready{device_note} — enable Depth Overlay or Pick Region."
             )
         else:
             self.depth_assist_panel.set_depth_available(False)
             self.depth_assist_panel.set_status(
-                "Analyze Scene on the current frame (SOURCE depth prior)."
+                "Depth model ready — Analyze Scene on the Master Frame (SOURCE prior)."
             )
 
     def _request_depth_analysis(self) -> None:
@@ -437,7 +447,19 @@ class WorkspaceWindow(QMainWindow):
 
     def _depth_analysis_started(self, frame_number: int) -> None:
         self.depth_assist_panel.set_analyzing(True)
-        self.depth_assist_panel.set_status(f"Analyzing Scene · frame {frame_number}…")
+        diagnostics = self.controller.depth_backend_diagnostics()
+        load_state = getattr(diagnostics, "load_state", "")
+        device = getattr(diagnostics, "device", None)
+        suffix = ""
+        if load_state == "loading":
+            suffix = " · Loading depth model…"
+        elif device:
+            suffix = f" · Using {device}"
+        if getattr(diagnostics, "used_cpu_fallback", False):
+            suffix = " · Using CPU fallback"
+        self.depth_assist_panel.set_status(
+            f"Analyzing Scene · frame {frame_number}{suffix}"
+        )
 
     def _depth_analysis_ready(self, depth_frame: object) -> None:
         self.depth_assist_panel.set_analyzing(False)

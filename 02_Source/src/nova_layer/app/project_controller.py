@@ -47,6 +47,10 @@ from nova_layer.app.color_pipeline_diagnostics import (
     build_color_pipeline_diagnostics,
 )
 from nova_layer.app.depth_analysis import DepthAnalysisService
+from nova_layer.app.depth_backend import (
+    create_default_depth_capability,
+    depth_backend_diagnostics,
+)
 from nova_layer.app.depth_frame_cache import DepthFrameCache
 from nova_layer.app.depth_guidance import (
     DepthGuidanceProposal,
@@ -373,15 +377,18 @@ class ProjectController(QObject):
         self._last_render_color_policy: str | None = None
         self._sam_processing_profile = SamProcessingProfile()
         self._last_sam_input_diagnostics: ProcessingInputDiagnostics | None = None
-        self._depth_capability = depth_analysis
+        if depth_analysis is not None:
+            self._depth_capability = depth_analysis
+        else:
+            self._depth_capability = create_default_depth_capability()
         self._depth_cache = DepthFrameCache()
         self._depth_service: DepthAnalysisService | None = (
             DepthAnalysisService(
                 frame_decoder=self._frame_decoder,
-                capability=depth_analysis,
+                capability=self._depth_capability,
                 cache=self._depth_cache,
             )
-            if depth_analysis is not None
+            if self._depth_capability is not None
             else None
         )
         self._last_depth_frame: DepthFrame | None = None
@@ -642,6 +649,17 @@ class ProjectController(QObject):
         return self._last_depth_frame
 
     @property
+    def depth_capability(self) -> DepthAnalysisCapability | None:
+        return self._depth_capability
+
+    def depth_backend_diagnostics(self) -> object:
+        """Session diagnostics for Depth Assist (no schema mutation)."""
+        return depth_backend_diagnostics(self._depth_capability)
+
+    def is_depth_backend_available(self) -> bool:
+        return self._depth_capability is not None
+
+    @property
     def last_depth_region(self) -> DepthRegion | None:
         return self._last_depth_region
 
@@ -859,7 +877,8 @@ class ProjectController(QObject):
     def start_depth_analysis(self, frame_number: int | None = None) -> bool:
         """Analyze one SOURCE frame into a DepthFrame (async). Depth is not a matte."""
         if self._depth_service is None or self._depth_capability is None:
-            message = "Depth analysis is unavailable."
+            diagnostics = depth_backend_diagnostics(None)
+            message = diagnostics.last_error or "Depth analysis is unavailable."
             self.error_occurred.emit(message)
             self.depth_analysis_failed.emit(message)
             return False
