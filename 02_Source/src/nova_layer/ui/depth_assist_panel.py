@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -36,6 +37,10 @@ class DepthAssistPanel(QWidget):
     clear_region_requested = Signal()
     assist_requested = Signal()
     clear_depth_guidance_requested = Signal()
+    study_mode_toggled = Signal(bool)
+    start_study_requested = Signal()
+    finish_study_requested = Signal()
+    export_study_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -167,6 +172,48 @@ class DepthAssistPanel(QWidget):
         guidance_form.addRow("Bounding box", self.guidance_bbox_label)
         root.addWidget(guidance)
 
+        study = QGroupBox("Artist Study (local)")
+        study.setObjectName("depthAssistStudyGroup")
+        study_form = QFormLayout(study)
+        self.study_mode_check = QCheckBox("Study Mode")
+        self.study_mode_check.setObjectName("depthStudyModeCheck")
+        self.study_mode_check.setChecked(False)
+        self.study_mode_check.toggled.connect(self._on_study_mode_toggled)
+        study_form.addRow("", self.study_mode_check)
+        self.study_workflow_combo = QComboBox()
+        self.study_workflow_combo.setObjectName("depthStudyWorkflowCombo")
+        self.study_workflow_combo.addItem("Manual", "manual")
+        self.study_workflow_combo.addItem("Depth Assist", "depth_assist")
+        self.study_workflow_combo.setEnabled(False)
+        study_form.addRow("Workflow", self.study_workflow_combo)
+        study_row = QHBoxLayout()
+        self.start_study_button = QPushButton("Start Study")
+        self.start_study_button.setObjectName("depthStartStudyButton")
+        self.start_study_button.setEnabled(False)
+        self.start_study_button.clicked.connect(self.start_study_requested.emit)
+        self.finish_study_button = QPushButton("Finish Study")
+        self.finish_study_button.setObjectName("depthFinishStudyButton")
+        self.finish_study_button.setEnabled(False)
+        self.finish_study_button.clicked.connect(self.finish_study_requested.emit)
+        self.export_study_button = QPushButton("Export JSON")
+        self.export_study_button.setObjectName("depthExportStudyButton")
+        self.export_study_button.setEnabled(False)
+        self.export_study_button.clicked.connect(self.export_study_requested.emit)
+        study_row.addWidget(self.start_study_button)
+        study_row.addWidget(self.finish_study_button)
+        study_row.addWidget(self.export_study_button)
+        study_form.addRow(study_row)
+        self.study_interactions_label = QLabel("—")
+        self.study_interactions_label.setObjectName("depthStudyInteractionsLabel")
+        self.study_refine_label = QLabel("—")
+        self.study_refine_label.setObjectName("depthStudyRefineLabel")
+        self.study_duration_label = QLabel("—")
+        self.study_duration_label.setObjectName("depthStudyDurationLabel")
+        study_form.addRow("Interactions", self.study_interactions_label)
+        study_form.addRow("Refine rounds", self.study_refine_label)
+        study_form.addRow("Duration", self.study_duration_label)
+        root.addWidget(study)
+
         self.status_label = QLabel(
             "Depth Assist builds Depth Regions (spatial priors), not object mattes."
         )
@@ -177,6 +224,58 @@ class DepthAssistPanel(QWidget):
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(message)
+
+    def study_mode_enabled(self) -> bool:
+        return bool(self.study_mode_check.isChecked())
+
+    def selected_study_workflow(self) -> str:
+        data = self.study_workflow_combo.currentData()
+        return str(data) if data is not None else "manual"
+
+    def set_study_recording(self, recording: bool) -> None:
+        recording = bool(recording)
+        mode_on = self.study_mode_enabled()
+        self.start_study_button.setEnabled(mode_on and not recording)
+        self.finish_study_button.setEnabled(mode_on and recording)
+        self.study_workflow_combo.setEnabled(mode_on and not recording)
+
+    def set_study_export_enabled(self, enabled: bool) -> None:
+        self.export_study_button.setEnabled(bool(enabled) and self.study_mode_enabled())
+
+    def update_study_counters(
+        self,
+        *,
+        interactions: int | None = None,
+        refine_rounds: int | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        if interactions is None:
+            self.study_interactions_label.setText("—")
+        else:
+            self.study_interactions_label.setText(str(int(interactions)))
+        if refine_rounds is None:
+            self.study_refine_label.setText("—")
+        else:
+            self.study_refine_label.setText(str(int(refine_rounds)))
+        if duration_seconds is None:
+            self.study_duration_label.setText("—")
+        else:
+            self.study_duration_label.setText(f"{float(duration_seconds):.1f}s")
+
+    def clear_study_counters(self) -> None:
+        self.update_study_counters(
+            interactions=None, refine_rounds=None, duration_seconds=None
+        )
+
+    def _on_study_mode_toggled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self.study_workflow_combo.setEnabled(enabled)
+        self.start_study_button.setEnabled(enabled)
+        if not enabled:
+            self.finish_study_button.setEnabled(False)
+            self.export_study_button.setEnabled(False)
+            self.clear_study_counters()
+        self.study_mode_toggled.emit(enabled)
 
     def set_analyzing(self, analyzing: bool) -> None:
         self.analyze_button.setEnabled(not analyzing)

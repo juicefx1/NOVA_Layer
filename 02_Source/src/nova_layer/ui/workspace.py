@@ -57,6 +57,23 @@ from nova_layer.app.effective_color_settings import (
 from nova_layer.adapters.color.settings import ResolvedColorSettings
 from nova_layer.app.false_color import FalseColorMode, FalseColorSettings, legend_for_mode
 from nova_layer.app.pixel_inspection import empty_pixel_inspection
+from nova_layer.app.depth_assist_telemetry import (
+    EVENT_ANALYZE_SCENE,
+    EVENT_BBOX_CHANGED,
+    EVENT_DEPTH_ASSIST_APPLIED,
+    EVENT_DEPTH_GUIDANCE_CLEARED,
+    EVENT_DEPTH_REGION_PICKED,
+    EVENT_GENERATE_HYPOTHESIS,
+    EVENT_HYPOTHESIS_ACCEPTED,
+    EVENT_HYPOTHESIS_REJECTED,
+    EVENT_MANUAL_NEGATIVE,
+    EVENT_MANUAL_POSITIVE,
+    EVENT_REFINE_ROUND_STARTED,
+    EVENT_TOLERANCE_CHANGED,
+    DepthAssistTelemetryRecorder,
+    export_session_json,
+    summarize_depth_assist_session,
+)
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
 from nova_layer.ui.depth_assist_panel import DepthAssistPanel
@@ -86,6 +103,10 @@ class WorkspaceWindow(QMainWindow):
             raise ValueError("Workspace requires an active project")
         self.controller = controller
         self._workspace = workspace or WorkspaceManager.shared()
+        self._depth_study_recorder = DepthAssistTelemetryRecorder()
+        self._study_last_points: tuple[tuple[float, float, str], ...] = ()
+        self._study_last_bbox: BoundingRegion | None = None
+        self._study_saw_hypothesis = False
         self._last_color_application: EffectiveColorApplication | None = None
         self.validation_dialog: ValidationDialog | None = None
         self._pending_frame = 0
@@ -393,7 +414,135 @@ class WorkspaceWindow(QMainWindow):
         panel.clear_region_requested.connect(self.controller.clear_depth_region)
         panel.assist_requested.connect(self._on_depth_assist_requested)
         panel.clear_depth_guidance_requested.connect(self._on_clear_depth_guidance)
+        panel.study_mode_toggled.connect(self._on_depth_study_mode_toggled)
+        panel.start_study_requested.connect(self._on_start_depth_study)
+        panel.finish_study_requested.connect(self._on_finish_depth_study)
+        panel.export_study_requested.connect(self._on_export_depth_study)
         self.viewer.depth_seed_clicked.connect(self._on_depth_seed_clicked)
+        try:
+            self.generate_button.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.generate_button.clicked.connect(self._on_generate_hypothesis_clicked)
+
+    def _study_media_fingerprint(self) -> str | None:
+        shot = self.controller.active_shot
+        if shot is None or shot.media is None:
+            return None
+        fingerprint = getattr(shot.media, "fingerprint", None)
+        return None if fingerprint is None else str(fingerprint)
+
+    def _study_frame_number(self) -> int | None:
+        shot = self.controller.active_shot
+        if shot is not None:
+            return int(shot.master_frame)
+        return int(self._current_frame)
+
+    def _study_backend_model_id(self) -> str | None:
+        diagnostics = self.controller.depth_backend_diagnostics()
+        model_id = getattr(diagnostics, "model_id", None)
+        return None if model_id is None else str(model_id)
+
+    def _refresh_study_counters(self) -> None:
+        session = self._depth_study_recorder.current_session
+        if session is None:
+            finished = self._depth_study_recorder.last_finished_session
+            if finished is None:
+                self.depth_assist_panel.clear_study_counters()
+                return
+            summary = summarize_depth_assist_session(finished)
+            self.depth_assist_panel.update_study_counters(
+                interactions=summary.primary_interactions,
+                refine_rounds=summary.refine_rounds,
+                duration_seconds=summary.duration_seconds,
+            )
+            return
+        summary = summarize_depth_assist_session(session)
+        from time import monotonic
+
+        duration = float(monotonic() - session.started_at_monotonic)
+        self.depth_assist_panel.update_study_counters(
+            interactions=summary.primary_interactions,
+            refine_rounds=summary.refine_rounds,
+            duration_seconds=duration,
+        )
+
+    def _record_study_event(self, event_type: str, **kwargs: object) -> None:
+        if not self._depth_study_recorder.is_recording:
+            return
+        kwargs.setdefault("frame_number", self._study_frame_number())
+        self._depth_study_recorder.record_event(event_type, **kwargs)  # type: ignore[arg-type]
+        self._refresh_study_counters()
+
+    def _on_depth_study_mode_toggled(self, enabled: bool) -> None:
+        self._depth_study_recorder.set_enabled(bool(enabled))
+        if not enabled:
+            if self._depth_study_recorder.is_recording:
+                self._depth_study_recorder.finish_session(notes="study_mode_disabled")
+            self._depth_study_recorder.clear()
+            self.depth_assist_panel.set_study_recording(False)
+            self.depth_assist_panel.set_study_export_enabled(False)
+            self.depth_assist_panel.clear_study_counters()
+            self._study_saw_hypothesis = False
+        else:
+            self.depth_assist_panel.set_study_recording(False)
+            self.depth_assist_panel.set_study_export_enabled(
+                self._depth_study_recorder.last_finished_session is not None
+            )
+
+    def _on_start_depth_study(self) -> None:
+        if not self.depth_assist_panel.study_mode_enabled():
+            return
+        workflow = self.depth_assist_panel.selected_study_workflow()
+        if workflow not in ("manual", "depth_assist"):
+            workflow = "manual"
+        self._depth_study_recorder.set_enabled(True)
+        self._study_saw_hypothesis = False
+        self._depth_study_recorder.start_session(
+            workflow=workflow,  # type: ignore[arg-type]
+            media_fingerprint=self._study_media_fingerprint(),
+            backend_model_id=self._study_backend_model_id(),
+            frame_number=self._study_frame_number(),
+        )
+        self.depth_assist_panel.set_study_recording(True)
+        self.depth_assist_panel.set_study_export_enabled(False)
+        self._refresh_study_counters()
+        self.statusBar().showMessage(f"Artist Study started · workflow={workflow}")
+
+    def _on_finish_depth_study(self) -> None:
+        if not self._depth_study_recorder.is_recording:
+            return
+        finished = self._depth_study_recorder.finish_session()
+        self.depth_assist_panel.set_study_recording(False)
+        self.depth_assist_panel.set_study_export_enabled(finished is not None)
+        if finished is not None:
+            self._refresh_study_counters()
+            summary = summarize_depth_assist_session(finished)
+            self.statusBar().showMessage(
+                "Artist Study finished · "
+                f"primary={summary.primary_interactions} refine={summary.refine_rounds}"
+            )
+
+    def _on_export_depth_study(self) -> None:
+        session = self._depth_study_recorder.last_finished_session
+        if session is None:
+            self.statusBar().showMessage("Finish a study before exporting.")
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Artist Study JSON",
+            "depth_assist_study.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        export_session_json(session, path)
+        self.statusBar().showMessage(f"Artist Study exported · {Path(path).name}")
+
+    def _on_generate_hypothesis_clicked(self) -> None:
+        self._record_study_event(EVENT_GENERATE_HYPOTHESIS)
+        self._study_saw_hypothesis = True
+        self.controller.start_hypothesis()
 
     def _set_depth_assist_visible(self, visible: bool) -> None:
         self.depth_assist_dock.setVisible(visible)
@@ -447,6 +596,11 @@ class WorkspaceWindow(QMainWindow):
 
     def _depth_analysis_started(self, frame_number: int) -> None:
         self.depth_assist_panel.set_analyzing(True)
+        self._record_study_event(
+            EVENT_ANALYZE_SCENE,
+            frame_number=int(frame_number),
+            backend_model_id=self._study_backend_model_id(),
+        )
         diagnostics = self.controller.depth_backend_diagnostics()
         load_state = getattr(diagnostics, "load_state", "")
         device = getattr(diagnostics, "device", None)
@@ -529,6 +683,12 @@ class WorkspaceWindow(QMainWindow):
     def _on_depth_tolerance_changed(self, tolerance: float) -> None:
         self.controller.set_depth_region_tolerance(tolerance)
         region = self.controller.last_depth_region
+        self._record_study_event(
+            EVENT_TOLERANCE_CHANGED,
+            tolerance=float(tolerance),
+            region_coverage=None if region is None else float(region.coverage),
+            warning=None if region is None else region.warning,
+        )
         if region is None:
             return
         # Re-seed with previous click when tolerance changes.
@@ -548,6 +708,14 @@ class WorkspaceWindow(QMainWindow):
         )
         if region is None:
             self.depth_assist_panel.set_status("Could not create a Depth Region at this click.")
+            return
+        self._record_study_event(
+            EVENT_DEPTH_REGION_PICKED,
+            tolerance=float(region.tolerance),
+            region_coverage=float(region.coverage),
+            warning=region.warning,
+            bbox_present=region.bounding_box is not None,
+        )
 
     def _depth_region_ready(self, region: object) -> None:
         from nova_layer.app.depth_region import DepthRegion
@@ -571,6 +739,19 @@ class WorkspaceWindow(QMainWindow):
                 "Assist with Depth failed — pick a valid Depth Region on the Master Frame first."
             )
             return
+        proposal = self.controller.last_depth_guidance
+        region = self.controller.last_depth_region
+        self._record_study_event(
+            EVENT_DEPTH_ASSIST_APPLIED,
+            tolerance=None if region is None else float(region.tolerance),
+            region_coverage=None if region is None else float(region.coverage),
+            positive_count=None if proposal is None else len(proposal.positive_points),
+            negative_count=None if proposal is None else len(proposal.negative_points),
+            bbox_present=None
+            if proposal is None
+            else proposal.bounding_region is not None,
+            warning=None if proposal is None else proposal.warning,
+        )
         self._refresh_viewer_guidance_from_controller()
 
     def _on_clear_depth_guidance(self) -> None:
@@ -580,6 +761,7 @@ class WorkspaceWindow(QMainWindow):
         self.depth_assist_panel.set_status(
             "Depth Assist guidance cleared — manual Artist Guidance preserved."
         )
+        self._record_study_event(EVENT_DEPTH_GUIDANCE_CLEARED)
 
     def _depth_guidance_applied(self, proposal: object) -> None:
         from nova_layer.app.depth_guidance import DepthGuidanceProposal
@@ -1498,6 +1680,29 @@ class WorkspaceWindow(QMainWindow):
         bounding_region: BoundingRegion | None,
         skeleton_guidance: SkeletonGuidance,
     ) -> None:
+        if self._depth_study_recorder.is_recording:
+            new_keys = {(round(p.x, 6), round(p.y, 6), p.polarity) for p in points}
+            old_keys = set(self._study_last_points)
+            for key in new_keys - old_keys:
+                if key[2] == "positive":
+                    self._record_study_event(EVENT_MANUAL_POSITIVE)
+                elif key[2] == "negative":
+                    self._record_study_event(EVENT_MANUAL_NEGATIVE)
+            old_bbox = self._study_last_bbox
+            bbox_changed = (old_bbox is None) != (bounding_region is None)
+            if old_bbox is not None and bounding_region is not None:
+                bbox_changed = (
+                    abs(old_bbox.x - bounding_region.x) > 1e-9
+                    or abs(old_bbox.y - bounding_region.y) > 1e-9
+                    or abs(old_bbox.width - bounding_region.width) > 1e-9
+                    or abs(old_bbox.height - bounding_region.height) > 1e-9
+                )
+            if bbox_changed and bounding_region is not None:
+                self._record_study_event(EVENT_BBOX_CHANGED, bbox_present=True)
+            self._study_last_points = tuple(
+                (round(p.x, 6), round(p.y, 6), p.polarity) for p in points
+            )
+            self._study_last_bbox = bounding_region
         layer = self.controller.update_artist_guidance(
             points,
             bounding_region,
@@ -1564,11 +1769,15 @@ class WorkspaceWindow(QMainWindow):
             self.propagate_button.setVisible(True)
             self.bg_removal_preview_button.setVisible(True)
             self.statusBar().showMessage("Object Identity confirmed")
+            self._record_study_event(EVENT_HYPOTHESIS_ACCEPTED)
         elif state == "rejected":
             self.viewer.set_mask_overlay(None)
             self._show_review_controls(False)
             self.bg_removal_preview_button.setVisible(False)
             self.statusBar().showMessage("Hypothesis rejected — refine Artist Guidance")
+            self._record_study_event(EVENT_HYPOTHESIS_REJECTED)
+            if self._study_saw_hypothesis:
+                self._record_study_event(EVENT_REFINE_ROUND_STARTED)
 
     def _show_validation_ready(self, frame_results: list[object]) -> None:
         self.propagate_button.setVisible(False)
@@ -2144,6 +2353,7 @@ class WorkspaceWindow(QMainWindow):
         self.viewer.set_mask_overlay(None)
         self._show_review_controls(False)
         self.statusBar().showMessage("Refine Artist Guidance and generate again")
+        self._record_study_event(EVENT_REFINE_ROUND_STARTED)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         # Cancel background processing and wait briefly. On timeout keep the
