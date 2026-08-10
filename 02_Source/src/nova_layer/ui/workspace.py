@@ -172,6 +172,8 @@ class WorkspaceWindow(QMainWindow):
         controller.depth_analysis_cancelled.connect(self._depth_analysis_cancelled)
         controller.depth_region_ready.connect(self._depth_region_ready)
         controller.depth_region_cleared.connect(self._depth_region_cleared)
+        controller.depth_guidance_applied.connect(self._depth_guidance_applied)
+        controller.depth_guidance_cleared.connect(self._depth_guidance_cleared)
         controller.skeleton_fusion_candidate_ready.connect(self._review_skeleton_fusion)
         controller.skeleton_fusion_reviewed.connect(self._skeleton_fusion_reviewed)
         controller.processing_started.connect(self._processing_started)
@@ -389,6 +391,8 @@ class WorkspaceWindow(QMainWindow):
         panel.pick_toggled.connect(self._on_depth_pick_toggled)
         panel.tolerance_changed.connect(self._on_depth_tolerance_changed)
         panel.clear_region_requested.connect(self.controller.clear_depth_region)
+        panel.assist_requested.connect(self._on_depth_assist_requested)
+        panel.clear_depth_guidance_requested.connect(self._on_clear_depth_guidance)
         self.viewer.depth_seed_clicked.connect(self._on_depth_seed_clicked)
 
     def _set_depth_assist_visible(self, visible: bool) -> None:
@@ -537,6 +541,53 @@ class WorkspaceWindow(QMainWindow):
     def _depth_region_cleared(self) -> None:
         self.depth_assist_panel.clear_region_stats()
         self.viewer.clear_depth_region_mask()
+
+    def _on_depth_assist_requested(self) -> None:
+        ok = self.controller.apply_depth_region_as_guidance()
+        if not ok:
+            self.depth_assist_panel.set_status(
+                "Assist with Depth failed — pick a valid Depth Region on the Master Frame first."
+            )
+            return
+        self._refresh_viewer_guidance_from_controller()
+
+    def _on_clear_depth_guidance(self) -> None:
+        self.controller.clear_depth_assist_guidance()
+        self._refresh_viewer_guidance_from_controller()
+        self.depth_assist_panel.clear_guidance_summary()
+        self.depth_assist_panel.set_status(
+            "Depth Assist guidance cleared — manual Artist Guidance preserved."
+        )
+
+    def _depth_guidance_applied(self, proposal: object) -> None:
+        from nova_layer.app.depth_guidance import DepthGuidanceProposal
+
+        if isinstance(proposal, DepthGuidanceProposal):
+            self.depth_assist_panel.apply_guidance_proposal(proposal)
+        self._refresh_viewer_guidance_from_controller()
+
+    def _depth_guidance_cleared(self) -> None:
+        self.depth_assist_panel.clear_guidance_summary()
+
+    def _refresh_viewer_guidance_from_controller(self) -> None:
+        shot = self.controller.active_shot
+        if shot is None or not shot.smart_layers:
+            return
+        intent = shot.smart_layers[0].artist_intent
+        self.viewer.blockSignals(True)
+        try:
+            self.viewer.set_guidance(
+                intent.points,
+                intent.bounding_region,
+                intent.skeleton_guidance,
+            )
+        finally:
+            self.viewer.blockSignals(False)
+        self._update_guidance_summary(
+            intent.points,
+            intent.bounding_region,
+            intent.skeleton_guidance,
+        )
 
     def _wire_false_color_panel(self) -> None:
         self.false_color_panel.settings_changed.connect(self._on_false_color_settings)

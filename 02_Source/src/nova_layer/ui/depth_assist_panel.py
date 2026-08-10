@@ -1,4 +1,4 @@
-"""Depth Assist dock panel (Phase D2) — Analyze Scene → Overlay → Pick Region."""
+"""Depth Assist dock panel (Phase D2/D3) — Analyze → Pick → Assist with Depth."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nova_layer.app.depth_guidance import DepthGuidanceProposal
 from nova_layer.app.depth_region import DEFAULT_DEPTH_TOLERANCE, DepthRegion
 
 
@@ -29,6 +30,8 @@ class DepthAssistPanel(QWidget):
     pick_toggled = Signal(bool)
     tolerance_changed = Signal(float)
     clear_region_requested = Signal()
+    assist_requested = Signal()
+    clear_depth_guidance_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -127,6 +130,39 @@ class DepthAssistPanel(QWidget):
         self.clear_region_button.clicked.connect(self.clear_region_requested.emit)
         root.addWidget(self.clear_region_button)
 
+        guidance = QGroupBox("Depth → Guidance")
+        guidance_form = QFormLayout(guidance)
+        assist_row = QHBoxLayout()
+        self.assist_button = QPushButton("Assist with Depth")
+        self.assist_button.setObjectName("depthAssistButton")
+        self.assist_button.setEnabled(False)
+        self.assist_button.clicked.connect(self.assist_requested.emit)
+        self.clear_depth_guidance_button = QPushButton("Clear Depth Guidance")
+        self.clear_depth_guidance_button.setObjectName("depthClearGuidanceButton")
+        self.clear_depth_guidance_button.setEnabled(False)
+        self.clear_depth_guidance_button.clicked.connect(
+            self.clear_depth_guidance_requested.emit
+        )
+        assist_row.addWidget(self.assist_button)
+        assist_row.addWidget(self.clear_depth_guidance_button)
+        guidance_form.addRow(assist_row)
+        self.guidance_positive_label = QLabel("—")
+        self.guidance_positive_label.setObjectName("depthGuidancePositiveLabel")
+        self.guidance_negative_label = QLabel("—")
+        self.guidance_negative_label.setObjectName("depthGuidanceNegativeLabel")
+        self.guidance_bbox_label = QLabel("—")
+        self.guidance_bbox_label.setObjectName("depthGuidanceBBoxLabel")
+        for widget in (
+            self.guidance_positive_label,
+            self.guidance_negative_label,
+            self.guidance_bbox_label,
+        ):
+            widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        guidance_form.addRow("Positive points", self.guidance_positive_label)
+        guidance_form.addRow("Negative points", self.guidance_negative_label)
+        guidance_form.addRow("Bounding box", self.guidance_bbox_label)
+        root.addWidget(guidance)
+
         self.status_label = QLabel(
             "Depth Assist builds Depth Regions (spatial priors), not object mattes."
         )
@@ -152,11 +188,16 @@ class DepthAssistPanel(QWidget):
             self.pick_button.blockSignals(True)
             self.pick_button.setChecked(False)
             self.pick_button.blockSignals(False)
+            self.set_assist_enabled(False)
+
+    def set_assist_enabled(self, enabled: bool) -> None:
+        self.assist_button.setEnabled(bool(enabled))
 
     def set_empty_state(self, message: str = "No project/media — import a shot first.") -> None:
         self.set_analyzing(False)
         self.set_depth_available(False)
         self.clear_region_stats()
+        self.clear_guidance_summary()
         self.set_status(message)
 
     def clear_region_stats(self) -> None:
@@ -165,6 +206,13 @@ class DepthAssistPanel(QWidget):
         self.coverage_label.setText("—")
         self.bbox_label.setText("—")
         self.clear_region_button.setEnabled(False)
+        self.set_assist_enabled(False)
+
+    def clear_guidance_summary(self) -> None:
+        self.guidance_positive_label.setText("—")
+        self.guidance_negative_label.setText("—")
+        self.guidance_bbox_label.setText("—")
+        self.clear_depth_guidance_button.setEnabled(False)
 
     def apply_region(self, region: DepthRegion | None) -> None:
         if region is None:
@@ -179,8 +227,32 @@ class DepthAssistPanel(QWidget):
             x0, y0, x1, y1 = region.bounding_box
             self.bbox_label.setText(f"({x0},{y0})–({x1},{y1})")
         self.clear_region_button.setEnabled(region.pixel_count > 0)
+        self.set_assist_enabled(region.pixel_count > 0)
         if region.warning:
             self.set_status(region.warning)
+
+    def apply_guidance_proposal(self, proposal: DepthGuidanceProposal | None) -> None:
+        if proposal is None:
+            self.clear_guidance_summary()
+            return
+        self.guidance_positive_label.setText(str(len(proposal.positive_points)))
+        self.guidance_negative_label.setText(str(len(proposal.negative_points)))
+        self.guidance_bbox_label.setText(
+            "yes" if proposal.bounding_region is not None else "no"
+        )
+        self.clear_depth_guidance_button.setEnabled(
+            bool(
+                proposal.positive_points
+                or proposal.negative_points
+                or proposal.bounding_region
+            )
+        )
+        if proposal.warning:
+            self.set_status(proposal.warning)
+        else:
+            self.set_status(
+                "Depth Assist guidance added — refine with +/- points, then Generate Hypothesis."
+            )
 
     def current_tolerance(self) -> float:
         return float(self.tolerance_spin.value())

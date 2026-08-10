@@ -48,6 +48,12 @@ from nova_layer.app.color_pipeline_diagnostics import (
 )
 from nova_layer.app.depth_analysis import DepthAnalysisService
 from nova_layer.app.depth_frame_cache import DepthFrameCache
+from nova_layer.app.depth_guidance import (
+    DepthGuidanceProposal,
+    build_depth_guidance_proposal,
+    guidance_point_key,
+    merge_depth_guidance_into_points,
+)
 from nova_layer.app.depth_region import (
     DEFAULT_DEPTH_TOLERANCE,
     DepthRegion,
@@ -318,6 +324,8 @@ class ProjectController(QObject):
     depth_analysis_cancelled = Signal()
     depth_region_ready = Signal(object)
     depth_region_cleared = Signal()
+    depth_guidance_applied = Signal(object)
+    depth_guidance_cleared = Signal()
 
     def __init__(
         self,
@@ -379,6 +387,10 @@ class ProjectController(QObject):
         self._last_depth_frame: DepthFrame | None = None
         self._last_depth_region: DepthRegion | None = None
         self._depth_region_tolerance = DEFAULT_DEPTH_TOLERANCE
+        # Session-only provenance for Depth Assist guidance (no schema field).
+        self._depth_guidance_keys: set[tuple[float, float, str]] = set()
+        self._depth_bbox_owned = False
+        self._last_depth_guidance: DepthGuidanceProposal | None = None
 
     def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
         """Cancel active processing and wait briefly for the worker pool to drain.
@@ -695,6 +707,150 @@ class ProjectController(QObject):
             self.depth_region_cleared.emit()
 
     @property
+    def last_depth_guidance(self) -> DepthGuidanceProposal | None:
+        return self._last_depth_guidance
+
+    @property
+    def depth_guidance_point_keys(self) -> frozenset[tuple[float, float, str]]:
+        return frozenset(self._depth_guidance_keys)
+
+    @property
+    def depth_bbox_owned(self) -> bool:
+        return bool(self._depth_bbox_owned)
+
+    def build_depth_guidance(self) -> DepthGuidanceProposal | None:
+        """Build a Depth→guidance proposal without mutating ArtistIntent."""
+        shot = self.active_shot
+        region = self._last_depth_region
+        if shot is None or shot.media.source_path is None:
+            self.error_occurred.emit("Import media before Assist with Depth.")
+            return None
+        if self._last_depth_frame is None:
+            self.error_occurred.emit("Analyze Scene before Assist with Depth.")
+            return None
+        if region is None or region.pixel_count <= 0:
+            self.error_occurred.emit("Pick a Depth Region before Assist with Depth.")
+            return None
+        if int(region.frame_number) != int(shot.master_frame):
+            self.error_occurred.emit(
+                "Depth Region is from a different frame than the Master Frame."
+            )
+            return None
+        if self._last_depth_frame.frame_number != region.frame_number:
+            self.error_occurred.emit("Depth Region is stale relative to the Depth Frame.")
+            return None
+        return build_depth_guidance_proposal(
+            region,
+            image_width=int(shot.media.width),
+            image_height=int(shot.media.height),
+            include_negative_points=True,
+        )
+
+    def apply_depth_region_as_guidance(self) -> bool:
+        """Merge DepthRegion proposal into Artist Guidance (does not run SAM)."""
+        proposal = self.build_depth_guidance()
+        if proposal is None:
+            return False
+        if not proposal.positive_points and proposal.bounding_region is None:
+            message = proposal.warning or "Depth Assist produced no usable guidance."
+            self.error_occurred.emit(message)
+            return False
+
+        shot = self.active_shot
+        if shot is None:
+            return False
+        if shot.smart_layers:
+            intent = shot.smart_layers[0].artist_intent
+            existing_points = list(intent.points)
+            existing_bbox = intent.bounding_region
+            skeleton = intent.skeleton_guidance
+        else:
+            existing_points = []
+            existing_bbox = None
+            skeleton = None
+
+        merged_points, new_keys = merge_depth_guidance_into_points(
+            existing_points,
+            proposal,
+            previous_depth_keys=self._depth_guidance_keys,
+        )
+        if existing_bbox is not None and not self._depth_bbox_owned:
+            merged_bbox = existing_bbox
+            owns_bbox = False
+        elif proposal.bounding_region is not None:
+            merged_bbox = proposal.bounding_region
+            owns_bbox = True
+        else:
+            merged_bbox = None if self._depth_bbox_owned else existing_bbox
+            owns_bbox = False
+
+        layer = self.update_artist_guidance(
+            merged_points,
+            merged_bbox,
+            skeleton,
+            sync_depth_provenance=False,
+        )
+        if layer is None:
+            return False
+        self._depth_guidance_keys = new_keys
+        self._depth_bbox_owned = owns_bbox
+        self._last_depth_guidance = proposal
+        self.depth_guidance_applied.emit(proposal)
+        return True
+
+    def clear_depth_assist_guidance(self) -> bool:
+        """Remove Depth-generated guidance only; preserve manual points/bbox."""
+        shot = self.active_shot
+        if shot is None:
+            self.error_occurred.emit("No active shot.")
+            return False
+        if shot.smart_layers:
+            intent = shot.smart_layers[0].artist_intent
+            remaining = [
+                point
+                for point in intent.points
+                if guidance_point_key(point) not in self._depth_guidance_keys
+            ]
+            bbox = None if self._depth_bbox_owned else intent.bounding_region
+            skeleton = intent.skeleton_guidance
+        else:
+            remaining = []
+            bbox = None
+            skeleton = None
+
+        self._depth_guidance_keys = set()
+        self._depth_bbox_owned = False
+        self._last_depth_guidance = None
+        if shot.smart_layers or remaining or bbox is not None:
+            layer = self.update_artist_guidance(
+                remaining,
+                bbox,
+                skeleton,
+                sync_depth_provenance=False,
+            )
+            if layer is None and shot.smart_layers:
+                return False
+        self.depth_guidance_cleared.emit()
+        return True
+
+    def _sync_depth_guidance_ownership(
+        self,
+        points: list[GuidancePoint],
+        bounding_region: BoundingRegion | None,
+    ) -> None:
+        """Prune session provenance after manual viewer edits."""
+        surviving = {
+            guidance_point_key(point)
+            for point in points
+            if guidance_point_key(point) in self._depth_guidance_keys
+        }
+        self._depth_guidance_keys = surviving
+        if self._depth_bbox_owned and bounding_region is None:
+            self._depth_bbox_owned = False
+            if not self._depth_guidance_keys and self._last_depth_guidance is not None:
+                self._last_depth_guidance = None
+
+    @property
     def depth_cache_stats(self) -> FrameCacheStats | None:
         if self._depth_service is None and self._depth_capability is None:
             return None
@@ -789,6 +945,10 @@ class ProjectController(QObject):
         self._depth_cache.clear()
         self._last_depth_frame = None
         self._clear_depth_region_silent()
+        if self._depth_guidance_keys or self._depth_bbox_owned:
+            self.clear_depth_assist_guidance()
+        else:
+            self._last_depth_guidance = None
 
     def create_project(self, name: str, parent_directory: Path) -> Project | None:
         clean_name = name.strip()
@@ -1006,11 +1166,16 @@ class ProjectController(QObject):
         points: list[GuidancePoint],
         bounding_region: BoundingRegion | None,
         skeleton_guidance: SkeletonGuidance | None = None,
+        *,
+        sync_depth_provenance: bool = True,
     ) -> SmartLayer | None:
         shot = self.active_shot
         if shot is None:
             self.error_occurred.emit("Import media before adding Artist Guidance.")
             return None
+
+        if sync_depth_provenance:
+            self._sync_depth_guidance_ownership(points, bounding_region)
 
         intent = ArtistIntent(
             master_frame=shot.master_frame,
