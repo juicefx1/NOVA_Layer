@@ -33,6 +33,7 @@ class DepthAssistPanel(QWidget):
     overlay_toggled = Signal(bool)
     opacity_changed = Signal(float)
     pick_toggled = Signal(bool)
+    one_click_toggled = Signal(bool)
     tolerance_changed = Signal(float)
     clear_region_requested = Signal()
     assist_requested = Signal()
@@ -67,6 +68,14 @@ class DepthAssistPanel(QWidget):
         self.overlay_check.setEnabled(False)
         self.overlay_check.toggled.connect(self.overlay_toggled.emit)
         form.addRow("", self.overlay_check)
+
+        self.one_click_button = QPushButton("One-Click Select")
+        self.one_click_button.setObjectName("depthOneClickButton")
+        self.one_click_button.setCheckable(True)
+        self.one_click_button.setChecked(False)
+        self.one_click_button.setEnabled(False)
+        self.one_click_button.toggled.connect(self.one_click_toggled.emit)
+        form.addRow("", self.one_click_button)
 
         opacity_row = QHBoxLayout()
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -277,6 +286,16 @@ class DepthAssistPanel(QWidget):
             self.clear_study_counters()
         self.study_mode_toggled.emit(enabled)
 
+    def one_click_enabled(self) -> bool:
+        return bool(self.one_click_button.isChecked())
+
+    def set_one_click_enabled(self, enabled: bool) -> None:
+        self.one_click_button.setEnabled(bool(enabled))
+        if not enabled and self.one_click_button.isChecked():
+            self.one_click_button.blockSignals(True)
+            self.one_click_button.setChecked(False)
+            self.one_click_button.blockSignals(False)
+
     def set_analyzing(self, analyzing: bool) -> None:
         self.analyze_button.setEnabled(not analyzing)
         self.cancel_button.setEnabled(analyzing)
@@ -299,6 +318,7 @@ class DepthAssistPanel(QWidget):
     def set_empty_state(self, message: str = "No project/media — import a shot first.") -> None:
         self.set_analyzing(False)
         self.set_depth_available(False)
+        self.set_one_click_enabled(False)
         self.clear_region_stats()
         self.clear_guidance_summary()
         self.set_status(message)

@@ -75,3 +75,23 @@ def test_failure_cancel_safe_no_polling(tmp_path: Path, qtbot: QtBot) -> None:
     assert "import" in window.depth_assist_panel.status_label.text().casefold() or True
     # No dedicated depth polling timer should exist.
     assert not hasattr(window, "_depth_poll_timer")
+
+
+def test_one_click_default_off_and_overlay_not_required(tmp_path: Path, qtbot: QtBot) -> None:
+    window = _workspace(tmp_path, qtbot)
+    assert window.controller.import_media(_png_sequence(tmp_path)) is not None
+    shot = window.controller.active_shot
+    assert shot is not None
+    assert window.controller.request_frame(int(shot.master_frame))
+    window.depth_assist_action.setChecked(True)
+    panel = window.depth_assist_panel
+    assert not panel.one_click_button.isChecked()
+    assert not panel.overlay_check.isChecked()
+    panel.one_click_button.setChecked(True)
+    assert window.viewer.depth_pick_mode is True
+    with qtbot.waitSignal(window.controller.hypothesis_ready, timeout=5000):
+        window._on_depth_seed_clicked(8, 6)
+    assert "review" in panel.status_label.text().casefold()
+    assert not panel.overlay_check.isChecked()
+    panel.one_click_button.setChecked(False)
+    assert window.viewer.depth_pick_mode is False

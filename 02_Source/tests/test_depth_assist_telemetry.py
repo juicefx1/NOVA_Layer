@@ -17,6 +17,8 @@ from nova_layer.app.depth_assist_telemetry import (
     EVENT_STUDY_FINISHED,
     EVENT_STUDY_STARTED,
     EVENT_TOLERANCE_CHANGED,
+    EVENT_ONE_CLICK_PROPOSAL_STARTED,
+    EVENT_ONE_CLICK_PROPOSAL_READY,
     DepthAssistTelemetryRecorder,
     compare_sessions,
     export_session_csv_summary,
@@ -135,3 +137,22 @@ def test_warning_path_sanitized() -> None:
     warning = finished.events[1].warning or ""
     assert "/Users" not in warning
     assert "tolerance" in warning.lower() or "lower" in warning.lower()
+
+
+def test_one_click_events_study_off_noop_and_on_records() -> None:
+    off = DepthAssistTelemetryRecorder()
+    assert off.record_event(EVENT_ONE_CLICK_PROPOSAL_STARTED) is None
+    on = DepthAssistTelemetryRecorder()
+    on.set_enabled(True)
+    on.start_session(workflow="depth_assist", media_fingerprint="fp")
+    on.record_event(EVENT_ONE_CLICK_PROPOSAL_STARTED, frame_number=0)
+    on.record_event(EVENT_ONE_CLICK_PROPOSAL_READY, frame_number=0)
+    finished = on.finish_session()
+    assert finished is not None
+    types = [event.event_type for event in finished.events]
+    assert EVENT_ONE_CLICK_PROPOSAL_STARTED in types
+    assert EVENT_ONE_CLICK_PROPOSAL_READY in types
+    payload = json.dumps(session_to_json_dict(finished))
+    assert "/Users" not in payload
+    assert "mask" not in payload
+    assert ".png" not in payload

@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nova_layer.app.project_controller import ProjectController
 from nova_layer.domain.models import (
     BoundingRegion,
     GuidancePoint,
@@ -68,11 +67,31 @@ from nova_layer.app.depth_assist_telemetry import (
     EVENT_HYPOTHESIS_REJECTED,
     EVENT_MANUAL_NEGATIVE,
     EVENT_MANUAL_POSITIVE,
+    EVENT_ONE_CLICK_DEPTH_ANALYSIS,
+    EVENT_ONE_CLICK_DEPTH_CACHE_HIT,
+    EVENT_ONE_CLICK_GUIDANCE_APPLIED,
+    EVENT_ONE_CLICK_HYPOTHESIS_STARTED,
+    EVENT_ONE_CLICK_PROPOSAL_CANCELLED,
+    EVENT_ONE_CLICK_PROPOSAL_FAILED,
+    EVENT_ONE_CLICK_PROPOSAL_READY,
+    EVENT_ONE_CLICK_PROPOSAL_STARTED,
+    EVENT_ONE_CLICK_REGION_CREATED,
     EVENT_REFINE_ROUND_STARTED,
     EVENT_TOLERANCE_CHANGED,
     DepthAssistTelemetryRecorder,
     export_session_json,
     summarize_depth_assist_session,
+)
+from nova_layer.app.project_controller import (
+    ONE_CLICK_STATUS_ANALYZING_DEPTH,
+    ONE_CLICK_STATUS_BUILDING_REGION,
+    ONE_CLICK_STATUS_CANCELLED,
+    ONE_CLICK_STATUS_FAILED,
+    ONE_CLICK_STATUS_GENERATING_HYPOTHESIS,
+    ONE_CLICK_STATUS_IN_PROGRESS,
+    ONE_CLICK_STATUS_PREPARING_GUIDANCE,
+    ONE_CLICK_STATUS_READY_FOR_REVIEW,
+    ProjectController,
 )
 from nova_layer.ui.color_pipeline_diagnostics_dialog import ColorPipelineDiagnosticsDialog
 from nova_layer.ui.color_settings_dialog import ColorSettingsDialog
@@ -195,6 +214,7 @@ class WorkspaceWindow(QMainWindow):
         controller.depth_region_cleared.connect(self._depth_region_cleared)
         controller.depth_guidance_applied.connect(self._depth_guidance_applied)
         controller.depth_guidance_cleared.connect(self._depth_guidance_cleared)
+        controller.one_click_status_changed.connect(self._on_one_click_status_changed)
         controller.skeleton_fusion_candidate_ready.connect(self._review_skeleton_fusion)
         controller.skeleton_fusion_reviewed.connect(self._skeleton_fusion_reviewed)
         controller.processing_started.connect(self._processing_started)
@@ -406,10 +426,11 @@ class WorkspaceWindow(QMainWindow):
     def _wire_depth_assist_panel(self) -> None:
         panel = self.depth_assist_panel
         panel.analyze_requested.connect(self._request_depth_analysis)
-        panel.cancel_requested.connect(self.controller.cancel_depth_analysis)
+        panel.cancel_requested.connect(self._on_depth_cancel_requested)
         panel.overlay_toggled.connect(self._on_depth_overlay_toggled)
         panel.opacity_changed.connect(self._on_depth_opacity_changed)
         panel.pick_toggled.connect(self._on_depth_pick_toggled)
+        panel.one_click_toggled.connect(self._on_one_click_toggled)
         panel.tolerance_changed.connect(self._on_depth_tolerance_changed)
         panel.clear_region_requested.connect(self.controller.clear_depth_region)
         panel.assist_requested.connect(self._on_depth_assist_requested)
@@ -559,12 +580,16 @@ class WorkspaceWindow(QMainWindow):
             self.depth_assist_panel.pick_button.blockSignals(True)
             self.depth_assist_panel.pick_button.setChecked(False)
             self.depth_assist_panel.pick_button.blockSignals(False)
+            self.depth_assist_panel.one_click_button.blockSignals(True)
+            self.depth_assist_panel.one_click_button.setChecked(False)
+            self.depth_assist_panel.one_click_button.blockSignals(False)
 
     def _refresh_depth_assist_empty_state(self) -> None:
         shot = self.controller.active_shot
         if shot is None or shot.media is None or shot.media.source_path is None:
             self.depth_assist_panel.set_empty_state()
             return
+        self.depth_assist_panel.set_one_click_enabled(True)
         if not self.controller.is_depth_backend_available():
             diagnostics = self.controller.depth_backend_diagnostics()
             detail = getattr(diagnostics, "last_error", None) or "Depth model unavailable."
@@ -616,8 +641,13 @@ class WorkspaceWindow(QMainWindow):
         )
 
     def _depth_analysis_ready(self, depth_frame: object) -> None:
-        self.depth_assist_panel.set_analyzing(False)
+        if not self.controller.one_click_in_progress:
+            self.depth_assist_panel.set_analyzing(False)
         self.depth_assist_panel.set_depth_available(True)
+        if self.controller.one_click_in_progress:
+            if self.depth_assist_panel.overlay_check.isChecked():
+                self._apply_depth_overlay_to_viewer()
+            return
         frame_number = getattr(depth_frame, "frame_number", "?")
         self.depth_assist_panel.set_status(
             f"Depth ready · frame {frame_number}. Depth Regions are spatial priors, not mattes."
@@ -627,12 +657,18 @@ class WorkspaceWindow(QMainWindow):
 
     def _depth_analysis_failed(self, message: str) -> None:
         self.depth_assist_panel.set_analyzing(False)
+        if self.controller.last_one_click_status == ONE_CLICK_STATUS_FAILED:
+            self.depth_assist_panel.set_status(ONE_CLICK_STATUS_FAILED)
+            return
         self.depth_assist_panel.set_status(
             f"{message} — Continue without Depth using Artist Guidance."
         )
 
     def _depth_analysis_cancelled(self) -> None:
         self.depth_assist_panel.set_analyzing(False)
+        if self.controller.last_one_click_status == ONE_CLICK_STATUS_CANCELLED:
+            self.depth_assist_panel.set_status(ONE_CLICK_STATUS_CANCELLED)
+            return
         self.depth_assist_panel.set_status("Depth analysis cancelled.")
 
     def _apply_depth_overlay_to_viewer(self) -> None:
@@ -671,13 +707,69 @@ class WorkspaceWindow(QMainWindow):
             self.depth_assist_panel.set_status("Analyze Scene before picking a Depth Region.")
             return
         if enabled:
+            self.depth_assist_panel.one_click_button.blockSignals(True)
+            self.depth_assist_panel.one_click_button.setChecked(False)
+            self.depth_assist_panel.one_click_button.blockSignals(False)
             # Avoid competing with guidance click tools.
             self._select_guidance_mode(GuidanceMode.NAVIGATE, True)
             self.viewer.set_mode(GuidanceMode.NAVIGATE)
-        self.viewer.set_depth_pick_mode(enabled)
+        self._sync_viewer_seed_mode()
         if enabled:
             self.depth_assist_panel.set_status(
                 "Pick Region — click the viewer to seed a Depth Region (not a matte)."
+            )
+
+    def _on_one_click_toggled(self, enabled: bool) -> None:
+        if enabled:
+            self.depth_assist_panel.pick_button.blockSignals(True)
+            self.depth_assist_panel.pick_button.setChecked(False)
+            self.depth_assist_panel.pick_button.blockSignals(False)
+            self._select_guidance_mode(GuidanceMode.NAVIGATE, True)
+            self.viewer.set_mode(GuidanceMode.NAVIGATE)
+            self.depth_assist_panel.set_status(
+                "One-Click Select ON — click an object to propose a layer (review still required)."
+            )
+        else:
+            self.depth_assist_panel.set_status("One-Click Select OFF — manual guidance restored.")
+        self._sync_viewer_seed_mode()
+
+    def _sync_viewer_seed_mode(self) -> None:
+        one_click = self.depth_assist_panel.one_click_enabled()
+        picking = self.depth_assist_panel.pick_button.isChecked()
+        self.viewer.set_depth_pick_mode(bool(one_click or picking))
+
+    def _on_depth_cancel_requested(self) -> None:
+        if self.controller.one_click_in_progress:
+            self.controller.cancel_one_click_proposal()
+            return
+        self.controller.cancel_depth_analysis()
+
+    def _on_one_click_status_changed(self, status: str) -> None:
+        self.depth_assist_panel.set_status(status)
+        busy = status in {
+            ONE_CLICK_STATUS_ANALYZING_DEPTH,
+            ONE_CLICK_STATUS_BUILDING_REGION,
+            ONE_CLICK_STATUS_PREPARING_GUIDANCE,
+            ONE_CLICK_STATUS_GENERATING_HYPOTHESIS,
+        }
+        if busy:
+            self.depth_assist_panel.set_analyzing(True)
+        elif status != ONE_CLICK_STATUS_IN_PROGRESS:
+            self.depth_assist_panel.set_analyzing(False)
+        event_type = {
+            ONE_CLICK_STATUS_ANALYZING_DEPTH: EVENT_ONE_CLICK_DEPTH_ANALYSIS,
+            ONE_CLICK_STATUS_BUILDING_REGION: EVENT_ONE_CLICK_REGION_CREATED,
+            ONE_CLICK_STATUS_PREPARING_GUIDANCE: EVENT_ONE_CLICK_GUIDANCE_APPLIED,
+            ONE_CLICK_STATUS_GENERATING_HYPOTHESIS: EVENT_ONE_CLICK_HYPOTHESIS_STARTED,
+            ONE_CLICK_STATUS_READY_FOR_REVIEW: EVENT_ONE_CLICK_PROPOSAL_READY,
+            ONE_CLICK_STATUS_FAILED: EVENT_ONE_CLICK_PROPOSAL_FAILED,
+            ONE_CLICK_STATUS_CANCELLED: EVENT_ONE_CLICK_PROPOSAL_CANCELLED,
+        }.get(status)
+        if event_type is not None:
+            request = self.controller.one_click_request
+            self._record_study_event(
+                event_type,
+                frame_number=None if request is None else int(request.frame_number),
             )
 
     def _on_depth_tolerance_changed(self, tolerance: float) -> None:
@@ -701,6 +793,13 @@ class WorkspaceWindow(QMainWindow):
             self._depth_region_ready(updated)
 
     def _on_depth_seed_clicked(self, x: int, y: int) -> None:
+        if self.depth_assist_panel.one_click_enabled():
+            self._record_study_event(EVENT_ONE_CLICK_PROPOSAL_STARTED)
+            started = self.controller.start_one_click_proposal(x, y)
+            request = self.controller.one_click_request
+            if started and request is not None and request.used_depth_cache:
+                self._record_study_event(EVENT_ONE_CLICK_DEPTH_CACHE_HIT)
+            return
         region = self.controller.select_depth_region(
             x=x,
             y=y,
@@ -1758,6 +1857,13 @@ class WorkspaceWindow(QMainWindow):
         mask: NDArray[np.uint8],
         confidence: float,
     ) -> None:
+        display_frame = self.controller.consume_one_click_display_frame()
+        if display_frame is not None and int(display_frame) != int(self._current_frame):
+            self.depth_assist_panel.set_analyzing(False)
+            self.depth_assist_panel.set_status(
+                f"Proposal completed for frame {display_frame}"
+            )
+            return
         self.viewer.set_mask_overlay(mask)
         self.frame_label.setText(f"Frame {frame_number} · Hypothesis {confidence:.0%}")
         self._show_review_controls(True)

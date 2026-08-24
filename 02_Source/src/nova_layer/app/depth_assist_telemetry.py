@@ -31,6 +31,15 @@ EVENT_HYPOTHESIS_REJECTED = "hypothesis_rejected"
 EVENT_HYPOTHESIS_ACCEPTED = "hypothesis_accepted"
 EVENT_REFINE_ROUND_STARTED = "refine_round_started"
 EVENT_STUDY_FINISHED = "study_finished"
+EVENT_ONE_CLICK_PROPOSAL_STARTED = "one_click_proposal_started"
+EVENT_ONE_CLICK_DEPTH_CACHE_HIT = "one_click_depth_cache_hit"
+EVENT_ONE_CLICK_DEPTH_ANALYSIS = "one_click_depth_analysis"
+EVENT_ONE_CLICK_REGION_CREATED = "one_click_region_created"
+EVENT_ONE_CLICK_GUIDANCE_APPLIED = "one_click_guidance_applied"
+EVENT_ONE_CLICK_HYPOTHESIS_STARTED = "one_click_hypothesis_started"
+EVENT_ONE_CLICK_PROPOSAL_READY = "one_click_proposal_ready"
+EVENT_ONE_CLICK_PROPOSAL_FAILED = "one_click_proposal_failed"
+EVENT_ONE_CLICK_PROPOSAL_CANCELLED = "one_click_proposal_cancelled"
 
 PRIMARY_EVENT_TYPES = frozenset(
     {
@@ -41,6 +50,7 @@ PRIMARY_EVENT_TYPES = frozenset(
         EVENT_DEPTH_REGION_PICKED,
         EVENT_DEPTH_ASSIST_APPLIED,
         EVENT_REFINE_ROUND_STARTED,
+        EVENT_ONE_CLICK_PROPOSAL_STARTED,
         # Refine clicks after reject are modeled as refine_round_started + manual_* .
     }
 )

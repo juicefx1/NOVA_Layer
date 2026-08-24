@@ -16,6 +16,9 @@ def test_panel_controls_and_empty_state(qtbot: QtBot) -> None:
     assert panel.analyze_button.text() == "Analyze Scene"
     assert panel.overlay_check.text() == "Depth Overlay"
     assert panel.pick_button.text() == "Pick Region"
+    assert panel.one_click_button.text() == "One-Click Select"
+    assert not panel.one_click_button.isChecked()
+    assert not panel.one_click_enabled()
     panel.set_empty_state()
     assert not panel.overlay_check.isEnabled()
     assert not panel.pick_button.isEnabled()

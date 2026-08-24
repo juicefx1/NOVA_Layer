@@ -179,6 +179,29 @@ class DepthAnalysisJobOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class OneClickProposalRequest:
+    """Snapshot of a D3.10 one-click object proposal (frame + seed are frozen)."""
+
+    frame_number: int
+    seed_x: int
+    seed_y: int
+    started_at: float
+    used_depth_cache: bool = False
+
+
+ONE_CLICK_STATUS_READY = "Ready"
+ONE_CLICK_STATUS_ANALYZING_DEPTH = "Analyzing depth…"
+ONE_CLICK_STATUS_BUILDING_REGION = "Building region…"
+ONE_CLICK_STATUS_PREPARING_GUIDANCE = "Preparing guidance…"
+ONE_CLICK_STATUS_GENERATING_HYPOTHESIS = "Generating hypothesis…"
+ONE_CLICK_STATUS_READY_FOR_REVIEW = "Ready for review"
+ONE_CLICK_STATUS_CANCELLED = "Cancelled"
+ONE_CLICK_STATUS_FAILED = "Failed — use manual guidance"
+ONE_CLICK_STATUS_IN_PROGRESS = "Object proposal already in progress"
+ONE_CLICK_STATUS_INVALID = "Invalid click — use manual guidance"
+
+
+@dataclass(frozen=True, slots=True)
 class SmartLayerRenderJobOutput:
     shot_id: UUID
     layer_id: UUID
@@ -331,6 +354,7 @@ class ProjectController(QObject):
     depth_region_cleared = Signal()
     depth_guidance_applied = Signal(object)
     depth_guidance_cleared = Signal()
+    one_click_status_changed = Signal(str)
 
     def __init__(
         self,
@@ -399,6 +423,9 @@ class ProjectController(QObject):
         self._depth_guidance_keys: set[tuple[float, float, str]] = set()
         self._depth_bbox_owned = False
         self._last_depth_guidance: DepthGuidanceProposal | None = None
+        self._one_click_pending: OneClickProposalRequest | None = None
+        self._one_click_display_frame: int | None = None
+        self._last_one_click_status: str = ONE_CLICK_STATUS_READY
 
     def shutdown(self, *, timeout_ms: int = DEFAULT_SHUTDOWN_TIMEOUT_MS) -> bool:
         """Cancel active processing and wait briefly for the worker pool to drain.
@@ -648,6 +675,18 @@ class ProjectController(QObject):
     @property
     def last_depth_frame(self) -> DepthFrame | None:
         return self._last_depth_frame
+
+    @property
+    def one_click_request(self) -> OneClickProposalRequest | None:
+        return self._one_click_pending
+
+    @property
+    def one_click_in_progress(self) -> bool:
+        return self._one_click_pending is not None
+
+    @property
+    def last_one_click_status(self) -> str:
+        return self._last_one_click_status
 
     @property
     def depth_capability(self) -> DepthAnalysisCapability | None:
@@ -954,6 +993,138 @@ class ProjectController(QObject):
         """Cancel a running depth analysis job (or the active processing job)."""
         return self._jobs.cancel()
 
+    def lookup_cached_depth_frame(self, frame_number: int) -> DepthFrame | None:
+        """Return a cached DepthFrame for ``frame_number`` without running inference."""
+        shot = self.active_shot
+        if shot is None:
+            return None
+        fingerprint = str(shot.media.fingerprint)
+        target = int(frame_number)
+        last = self._last_depth_frame
+        if (
+            last is not None
+            and int(last.frame_number) == target
+            and str(last.media_fingerprint) == fingerprint
+        ):
+            return last
+        if self._depth_service is None:
+            return None
+        key = self._depth_service.cache_key(
+            media_fingerprint=fingerprint,
+            frame_number=target,
+        )
+        return self._depth_cache.get(key)
+
+    def consume_one_click_display_frame(self) -> int | None:
+        """Return (and clear) the snapshot frame for one-click hypothesis display."""
+        frame = self._one_click_display_frame
+        self._one_click_display_frame = None
+        return frame
+
+    def start_one_click_proposal(self, seed_x: int, seed_y: int) -> bool:
+        """Snapshot click frame/seed and orchestrate depth → region → guidance → SAM."""
+        if self._one_click_pending is not None or self._jobs.is_running:
+            self._set_one_click_status(ONE_CLICK_STATUS_IN_PROGRESS)
+            return False
+        shot = self.active_shot
+        if shot is None or shot.media.source_path is None:
+            self._set_one_click_status(ONE_CLICK_STATUS_FAILED)
+            return False
+        if self._preview_frame_number is not None:
+            frame_number = int(self._preview_frame_number)
+        else:
+            frame_number = int(shot.master_frame)
+        width = int(shot.media.width)
+        height = int(shot.media.height)
+        x = int(seed_x)
+        y = int(seed_y)
+        if x < 0 or y < 0 or x >= width or y >= height:
+            self._set_one_click_status(ONE_CLICK_STATUS_INVALID)
+            return False
+        if frame_number != int(shot.master_frame):
+            self._set_one_click_status(
+                "One-Click Object Proposal uses the Master Frame — use manual guidance."
+            )
+            return False
+
+        request = OneClickProposalRequest(
+            frame_number=frame_number,
+            seed_x=x,
+            seed_y=y,
+            started_at=perf_counter(),
+            used_depth_cache=False,
+        )
+        self._one_click_pending = request
+        self._one_click_display_frame = None
+        cached = self.lookup_cached_depth_frame(frame_number)
+        if cached is not None:
+            self._one_click_pending = replace(request, used_depth_cache=True)
+            self._set_one_click_status(ONE_CLICK_STATUS_BUILDING_REGION)
+            return self._run_one_click_after_depth(cached)
+
+        if self._depth_service is None or self._depth_capability is None:
+            self._fail_one_click()
+            return False
+        self._set_one_click_status(ONE_CLICK_STATUS_ANALYZING_DEPTH)
+        started = self.start_depth_analysis(frame_number)
+        if not started:
+            self._fail_one_click()
+            return False
+        return True
+
+    def cancel_one_click_proposal(self) -> bool:
+        """Cancel in-flight one-click (reuses the active job cancel when possible)."""
+        if self._one_click_pending is None:
+            return False
+        if self._jobs.is_running:
+            return self._jobs.cancel()
+        self._clear_one_click_pending(status=ONE_CLICK_STATUS_CANCELLED)
+        return True
+
+    def _set_one_click_status(self, status: str) -> None:
+        self._last_one_click_status = str(status)
+        self.one_click_status_changed.emit(self._last_one_click_status)
+
+    def _clear_one_click_pending(self, *, status: str | None = None) -> None:
+        self._one_click_pending = None
+        if status is not None:
+            self._set_one_click_status(status)
+
+    def _fail_one_click(self) -> None:
+        if self._one_click_pending is None and self._last_one_click_status == ONE_CLICK_STATUS_FAILED:
+            return
+        self._one_click_pending = None
+        self._set_one_click_status(ONE_CLICK_STATUS_FAILED)
+
+    def _run_one_click_after_depth(self, depth_frame: DepthFrame) -> bool:
+        request = self._one_click_pending
+        if request is None:
+            return False
+        if int(depth_frame.frame_number) != int(request.frame_number):
+            self._fail_one_click()
+            return False
+        preview = self._preview_frame_number
+        if preview is not None and int(preview) != int(request.frame_number):
+            self._clear_one_click_pending(
+                status=f"Proposal completed for frame {request.frame_number}"
+            )
+            return False
+        self._last_depth_frame = depth_frame
+        self._set_one_click_status(ONE_CLICK_STATUS_BUILDING_REGION)
+        region = self.select_depth_region(x=request.seed_x, y=request.seed_y)
+        if region is None or region.pixel_count <= 0:
+            self._fail_one_click()
+            return False
+        self._set_one_click_status(ONE_CLICK_STATUS_PREPARING_GUIDANCE)
+        if not self.apply_depth_region_as_guidance():
+            self._fail_one_click()
+            return False
+        self._set_one_click_status(ONE_CLICK_STATUS_GENERATING_HYPOTHESIS)
+        if not self.start_hypothesis():
+            self._fail_one_click()
+            return False
+        return True
+
     def _rebind_depth_service(self) -> None:
         if self._depth_capability is None:
             self._depth_service = None
@@ -968,6 +1139,8 @@ class ProjectController(QObject):
         self._depth_cache.clear()
         self._last_depth_frame = None
         self._clear_depth_region_silent()
+        self._one_click_pending = None
+        self._one_click_display_frame = None
         if self._depth_guidance_keys or self._depth_bbox_owned:
             self.clear_depth_assist_guidance()
         else:
@@ -1441,9 +1614,13 @@ class ProjectController(QObject):
         layer.object_identity.maturity_state = MaturityState.HYPOTHESIS
         layer.object_identity.confidence = result.confidence
         if not self._save_current():
+            self._fail_one_click()
             return None
         self.hypothesis_ready.emit(shot.master_frame, result.mask, result.confidence)
         self.hypothesis_state_changed.emit("hypothesis")
+        if self._one_click_pending is not None:
+            self._one_click_display_frame = int(shot.master_frame)
+            self._clear_one_click_pending(status=ONE_CLICK_STATUS_READY_FOR_REVIEW)
         return frame_result
 
     def accept_hypothesis(self) -> bool:
@@ -2971,20 +3148,26 @@ class ProjectController(QObject):
             self.error_occurred.emit(
                 "Shot state changed during depth analysis; the result was discarded."
             )
+            self._fail_one_click()
             return
         if str(shot.media.fingerprint) != str(output.media_fingerprint):
             self.error_occurred.emit(
                 "Media identity changed during depth analysis; the result was discarded."
             )
+            self._fail_one_click()
             return
         self._last_depth_frame = output.depth_frame
         self._clear_depth_region_silent()
         self.depth_analysis_ready.emit(output.depth_frame)
+        if self._one_click_pending is not None:
+            self._run_one_click_after_depth(output.depth_frame)
 
     def _job_cancelled(self, name: str) -> None:
         self.processing_cancelled.emit(name)
         if name == "depth_analysis":
             self.depth_analysis_cancelled.emit()
+        if self._one_click_pending is not None:
+            self._clear_one_click_pending(status=ONE_CLICK_STATUS_CANCELLED)
 
     def _commit_skeleton_fusion_detection(
         self,
@@ -3703,6 +3886,7 @@ class ProjectController(QObject):
             self.error_occurred.emit(detail)
             self.processing_failed.emit(name, detail)
             self.depth_analysis_failed.emit(detail)
+            self._fail_one_click()
             return
         if name == "skeleton_fusion_detection":
             if "no semantic labels matching" in message:
@@ -3712,19 +3896,23 @@ class ProjectController(QObject):
                 )
                 self.error_occurred.emit(detail)
                 self.processing_failed.emit(name, detail)
+                self._fail_one_click()
                 return
             detail = f"Automatic pose detection failed: {message}"
             self.error_occurred.emit(detail)
             self.processing_failed.emit(name, detail)
+            self._fail_one_click()
             return
         if name == "smart_layer_export":
             detail = f"Smart Layer export failed: {message}"
             self.error_occurred.emit(detail)
             self.processing_failed.emit(name, detail)
+            self._fail_one_click()
             return
         detail = f"{name} failed: {message}"
         self.error_occurred.emit(detail)
         self.processing_failed.emit(name, detail)
+        self._fail_one_click()
 
     def validation_previews(
         self,
